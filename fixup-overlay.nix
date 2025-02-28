@@ -30,7 +30,7 @@ final: prev: {
   torch = prev.torch.overrideAttrs (
     old:
     let
-      cudaEnabled = (!stdenv.isDarwin && config.allowUnfree && config.cudaSupport);
+      cudaEnabled = (stdenv.isLinux && config.allowUnfree && config.cudaSupport);
     in
     {
       nativeBuildInputs =
