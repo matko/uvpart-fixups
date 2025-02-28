@@ -3,6 +3,7 @@
   config,
   cudaPackages,
   tbb_2021_11,
+  stdenv,
 }:
 final: prev: {
   nvidia-cusparse-cu12 = prev.nvidia-cusparse-cu12.overrideAttrs (old: {
@@ -29,7 +30,7 @@ final: prev: {
   torch = prev.torch.overrideAttrs (
     old:
     let
-      cudaEnabled = (config.allowUnfree && config.cudaSupport);
+      cudaEnabled = (!stdenv.isDarwin && config.allowUnfree && config.cudaSupport);
     in
     {
       nativeBuildInputs =
