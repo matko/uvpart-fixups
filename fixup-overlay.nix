@@ -59,4 +59,8 @@ final: prev: {
   numba = prev.numba.overrideAttrs (p: {
     buildInputs = p.buildInputs ++ [ tbb_2021_11 ];
   });
+
+  pyperclip = prev.pyperclip.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [ prev.setuptools ];
+  });
 }
