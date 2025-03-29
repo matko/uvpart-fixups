@@ -68,5 +68,10 @@ final: prev: {
       popd
     '';
   });
+  bitsandbytes = prev.bitsandbytes.overrideAttrs (old: {
+    # bitsandbytes dynamically loads dependencies, and always after torch.
+    # That should take care of all dynamic linking.
+    dontAutoPatchelf = true;
+  });
 
 }
