@@ -6,7 +6,7 @@
 }:
 final: prev: {
   nvidia-cuda-runtime-cu12 = prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
-    appendRunpaths = ["/run/opengl-driver/lib/:$ORIGIN"];
+    appendRunpaths = [ "/run/opengl-driver/lib/:$ORIGIN" ];
   });
   nvidia-cusparse-cu12 = prev.nvidia-cusparse-cu12.overrideAttrs (old: {
     preFixup =
@@ -36,11 +36,9 @@ final: prev: {
     in
     {
       cudaDependencies = map (name: final.${name}) (
-        builtins.filter (
-          name: cudaEnabled && lib.hasPrefix "nvidia-" name
-        ) (builtins.attrNames prev)
+        builtins.filter (name: cudaEnabled && lib.hasPrefix "nvidia-" name) (builtins.attrNames prev)
       );
-      autoPatchelfIgnoreMissingDeps = ["libcuda.so.1"];
+      autoPatchelfIgnoreMissingDeps = [ "libcuda.so.1" ];
       preFixup =
         (old.preFixup or "")
         + ''
@@ -63,4 +61,12 @@ final: prev: {
   pyperclip = prev.pyperclip.overrideAttrs (old: {
     buildInputs = (old.buildInputs or [ ]) ++ [ prev.setuptools ];
   });
+  triton = prev.triton.overrideAttrs (old: {
+    postInstall = ''
+      pushd $out/lib/python*/site-packages/
+      patch -p1 < ${./triton-find-nixos-driver.patch}
+      popd
+    '';
+  });
+
 }
