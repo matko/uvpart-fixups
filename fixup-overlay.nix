@@ -1,11 +1,13 @@
 {
   lib,
   config,
-  cudaPackages,
   tbb_2021_11,
   stdenv,
 }:
 final: prev: {
+  nvidia-cuda-runtime-cu12 = prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
+    appendRunpaths = ["/run/opengl-driver/lib/:$ORIGIN"];
+  });
   nvidia-cusparse-cu12 = prev.nvidia-cusparse-cu12.overrideAttrs (old: {
     preFixup =
       (old.preFixup or "")
@@ -33,14 +35,12 @@ final: prev: {
       cudaEnabled = (stdenv.isLinux && config.allowUnfree && config.cudaSupport);
     in
     {
-      nativeBuildInputs =
-        (old.nativeBuildInputs or [ ]) ++ (lib.optional cudaEnabled cudaPackages.cuda_cudart);
       cudaDependencies = map (name: final.${name}) (
         builtins.filter (
-          name: (!cudaEnabled || name != "nvidia-cuda-runtime-cu12") && lib.hasPrefix "nvidia-" name
+          name: cudaEnabled && lib.hasPrefix "nvidia-" name
         ) (builtins.attrNames prev)
       );
-      autoPatchelfIgnoreMissingDeps = lib.optional (!cudaEnabled) "libcuda.so.1";
+      autoPatchelfIgnoreMissingDeps = ["libcuda.so.1"];
       preFixup =
         (old.preFixup or "")
         + ''
