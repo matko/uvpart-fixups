@@ -6,7 +6,7 @@
 }:
 final: prev: {
   nvidia-cuda-runtime-cu12 = prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
-    appendRunpaths = [ "/run/opengl-driver/lib/:$ORIGIN" ];
+    appendRunpaths = (old.appendRunpaths or []) ++ [ "/run/opengl-driver/lib/:$ORIGIN" ];
   });
   nvidia-cusparse-cu12 = prev.nvidia-cusparse-cu12.overrideAttrs (old: {
     preFixup =
@@ -28,6 +28,9 @@ final: prev: {
           addAutoPatchelfSearchPath $dep/lib/python*/site-packages/nvidia/*/lib/
         done
       '';
+  });
+  nvidia-cudnn-cu12 = prev.nvidia-cudnn-cu12.overrideAttrs (old: {
+    appendRunpaths = (old.appendRunpaths or []) ++ [ "$ORIGIN" ];
   });
   torch = prev.torch.overrideAttrs (
     old:
