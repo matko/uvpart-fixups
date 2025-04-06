@@ -35,7 +35,7 @@ final: prev: {
   torch = prev.torch.overrideAttrs (
     old:
     let
-      cudaEnabled = (stdenv.isLinux && config.allowUnfree && config.cudaSupport);
+      cudaEnabled = stdenv.isLinux;
     in
     {
       cudaDependencies = map (name: final.${name}) (
