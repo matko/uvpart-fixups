@@ -6,7 +6,7 @@
 }:
 final: prev: {
   nvidia-cuda-runtime-cu12 = prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
-    appendRunpaths = (old.appendRunpaths or []) ++ [ "/run/opengl-driver/lib/:$ORIGIN" ];
+    appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "/run/opengl-driver/lib/:$ORIGIN" ];
   });
   nvidia-cusparse-cu12 = prev.nvidia-cusparse-cu12.overrideAttrs (old: {
     preFixup =
@@ -30,7 +30,7 @@ final: prev: {
       '';
   });
   nvidia-cudnn-cu12 = prev.nvidia-cudnn-cu12.overrideAttrs (old: {
-    appendRunpaths = (old.appendRunpaths or []) ++ [ "$ORIGIN" ];
+    appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
   });
   torch = prev.torch.overrideAttrs (
     old:
@@ -77,4 +77,12 @@ final: prev: {
     dontAutoPatchelf = true;
   });
 
+  # fastapi has a fastapi binary both in fastapi and fastapi-cli. When merging environments this causes a collision.
+  # Since fastapi pulls in fastapi-cli as a dependency to have a functional cli, delete the one in fastapi.
+  fastapi = prev.fastapi.overrideAttrs (old: {
+
+    preFixup = ''
+      rm -f $out/bin/fastapi
+    '';
+  });
 }
