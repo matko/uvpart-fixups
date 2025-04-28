@@ -91,4 +91,9 @@ final: prev: {
       rm -f $out/bin/fastapi
     '';
   });
+  fastcoref = prev.fastcoref.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or []) ++ [
+      prev.setuptools
+    ];
+  });
 }
