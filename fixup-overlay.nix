@@ -3,6 +3,7 @@
   config,
   tbb_2021_11,
   stdenv,
+  rdma-core,
 }:
 final: prev: {
   nvidia-cuda-runtime-cu12 = prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
@@ -31,6 +32,11 @@ final: prev: {
   });
   nvidia-cudnn-cu12 = prev.nvidia-cudnn-cu12.overrideAttrs (old: {
     appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
+  });
+  nvidia-cufile-cu12 = prev.nvidia-cufile-cu12.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or []) ++ [
+      rdma-core
+    ];
   });
   torch = prev.torch.overrideAttrs (
     old:
