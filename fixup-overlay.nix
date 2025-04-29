@@ -1,14 +1,22 @@
 {
   lib,
   config,
+  callPackage,
   tbb_2021_11,
   stdenv,
   rdma-core,
 }:
 final: prev: {
-  nvidia-cuda-runtime-cu12 = prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
-    appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "/run/opengl-driver/lib/:$ORIGIN" ];
-  });
+  nvidia-cuda-runtime-cu12 =
+    let
+      cuda-loader-helper = callPackage ./cuda-loader-helper { };
+    in
+    prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
+      patchelfFlags = [
+        "--add-needed ${cuda-loader-helper}/lib/cuda_loader_helper.so"
+      ];
+      appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
+    });
   nvidia-cusparse-cu12 = prev.nvidia-cusparse-cu12.overrideAttrs (old: {
     preFixup =
       (old.preFixup or "")
@@ -34,7 +42,7 @@ final: prev: {
     appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
   });
   nvidia-cufile-cu12 = prev.nvidia-cufile-cu12.overrideAttrs (old: {
-    buildInputs = (old.buildInputs or []) ++ [
+    buildInputs = (old.buildInputs or [ ]) ++ [
       rdma-core
     ];
   });
@@ -92,7 +100,7 @@ final: prev: {
     '';
   });
   fastcoref = prev.fastcoref.overrideAttrs (old: {
-    buildInputs = (old.buildInputs or []) ++ [
+    buildInputs = (old.buildInputs or [ ]) ++ [
       prev.setuptools
     ];
   });
