@@ -104,4 +104,7 @@ final: prev: {
       prev.setuptools
     ];
   });
+  nats-py = prev.nats-py.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or []) ++ [prev.setuptools];
+  });
 }
