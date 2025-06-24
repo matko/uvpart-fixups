@@ -2,7 +2,7 @@
   lib,
   config,
   callPackage,
-  tbb_2021_11,
+  tbb_2021,
   stdenv,
   rdma-core,
 }:
@@ -72,7 +72,7 @@ final: prev: {
     nativeBuildInputs = p.nativeBuildInputs ++ [ final.setuptools ];
   });
   numba = prev.numba.overrideAttrs (p: {
-    buildInputs = p.buildInputs ++ [ tbb_2021_11 ];
+    buildInputs = p.buildInputs ++ [ tbb_2021 ];
   });
 
   pyperclip = prev.pyperclip.overrideAttrs (old: {
