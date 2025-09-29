@@ -5,6 +5,7 @@
   tbb_2022,
   stdenv,
   rdma-core,
+  file
 }:
 final: prev: {
   nvidia-cuda-runtime-cu12 =
@@ -116,7 +117,7 @@ final: prev: {
   python-magic = prev.python-magic.overrideAttrs (old: {
     # we need to patch the shared object loader to hold an exact location
     preFixup = ''
-sed -i "s|yield 'libmagic.so.1'|yield '${pkgs.file}/lib/libmagic.so.1'|" $out/lib/python3.13/site-packages/magic/loader.py
+sed -i "s|yield 'libmagic.so.1'|yield '${file}/lib/libmagic.so.1'|" $out/lib/python3.13/site-packages/magic/loader.py
 '';
   });
 }
