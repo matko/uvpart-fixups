@@ -5,7 +5,7 @@
   tbb_2022,
   stdenv,
   rdma-core,
-  file
+  file,
 }:
 final: prev: {
   nvidia-cuda-runtime-cu12 =
@@ -106,10 +106,10 @@ final: prev: {
     ];
   });
   nats-py = prev.nats-py.overrideAttrs (old: {
-    buildInputs = (old.buildInputs or []) ++ [prev.setuptools];
+    buildInputs = (old.buildInputs or [ ]) ++ [ prev.setuptools ];
   });
   nkeys = prev.nkeys.overrideAttrs (old: {
-    buildInputs = (old.buildInputs or []) ++ [prev.setuptools];
+    buildInputs = (old.buildInputs or [ ]) ++ [ prev.setuptools ];
   });
   langdetect = prev.langdetect.overrideAttrs (old: {
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ final.setuptools ];
@@ -117,7 +117,34 @@ final: prev: {
   python-magic = prev.python-magic.overrideAttrs (old: {
     # we need to patch the shared object loader to hold an exact location
     preFixup = ''
-sed -i "s|yield 'libmagic.so.1'|yield '${file}/lib/libmagic.so.1'|" $out/lib/python3.13/site-packages/magic/loader.py
-'';
+      sed -i "s|yield 'libmagic.so.1'|yield '${file}/lib/libmagic.so.1'|" $out/lib/python3.13/site-packages/magic/loader.py
+    '';
+  });
+  # TODO - maybe it's not great to only fixup paddle for cu12 but that's what I use
+  paddlepaddle-gpu = prev.paddlepaddle-gpu.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [ rdma-core ];
+    autoPatchelfIgnoreMissingDeps = [
+      "libcuda.so.1"
+    ];
+    cudaDependencies = with final; [
+      nvidia-cublas-cu12
+      nvidia-cudnn-cu12
+      nvidia-cusolver-cu12
+      nvidia-curand-cu12
+      nvidia-cuda-nvrtc-cu12
+      nvidia-cuda-runtime-cu12
+    ];
+
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        for dep in $cudaDependencies;do
+          addAutoPatchelfSearchPath $dep/lib/python*/site-packages/nvidia/*/lib/
+        done
+
+        cat ${./cuda_preloader.py} > core.py
+        cat $out/lib/python*/site-packages/paddle/base/core.py >> core.py
+        mv core.py $out/lib/python*/site-packages/paddle/base/core.py
+      '';
   });
 }
