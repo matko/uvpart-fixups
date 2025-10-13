@@ -147,4 +147,7 @@ final: prev: {
         mv core.py $out/lib/python*/site-packages/paddle/base/core.py
       '';
   });
+  antlr4-python3-runtime = prev.antlr4-python3-runtime.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [ final.setuptools ];
+  });
 }
