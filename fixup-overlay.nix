@@ -6,6 +6,9 @@
   stdenv,
   rdma-core,
   file,
+  libfabric,
+  pmix,
+  mpi,
 }:
 final: prev: {
   nvidia-cuda-runtime-cu12 =
@@ -149,5 +152,20 @@ final: prev: {
   });
   antlr4-python3-runtime = prev.antlr4-python3-runtime.overrideAttrs (old: {
     buildInputs = (old.buildInputs or [ ]) ++ [ final.setuptools ];
+  });
+  nvidia-nvshmem-cu12 = prev.nvidia-nvshmem-cu12.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [
+      libfabric
+      pmix
+      mpi
+      rdma-core
+    ];
+  });
+  torchvision = prev.torchvision.overrideAttrs (old: {
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        addAutoPatchelfSearchPath ${final.torch}/lib/python*/site-packages/torch/lib
+      '';
   });
 }
