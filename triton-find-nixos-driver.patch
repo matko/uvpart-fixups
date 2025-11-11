@@ -1,21 +1,21 @@
 diff --git a/triton/backends/amd/driver.py b/triton/backends/amd/driver.py
-index b99ff86c8..46c341e7f 100644
+index 3418ce2..9c55465 100644
 --- a/triton/backends/amd/driver.py
 +++ b/triton/backends/amd/driver.py
-@@ -105,7 +105,11 @@ def _get_path_to_hip_runtime_dylib():
-             paths.append(f)
+@@ -139,7 +139,11 @@ def _get_path_to_hip_runtime_dylib():
+         paths.append(rocm_lib_path)
  
      # Afterwards try to search the loader dynamic library resolution paths.
--    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
+-    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode(errors="ignore")
 +    # PATCH: ldconfig fails on NixOS
 +    try:
-+        libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
++        libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode(errors="ignore")
 +    except FileNotFoundError:
 +        libs = ""
      # each line looks like the following:
      # libamdhip64.so.6 (libc6,x86-64) => /opt/rocm-6.0.2/lib/libamdhip64.so.6
      # libamdhip64.so (libc6,x86-64) => /opt/rocm-6.0.2/lib/libamdhip64.so
-@@ -120,6 +124,11 @@ def _get_path_to_hip_runtime_dylib():
+@@ -154,6 +158,11 @@ def _get_path_to_hip_runtime_dylib():
      if os.path.exists(common_install_path):
          return common_install_path
      paths.append(common_install_path)
@@ -28,23 +28,23 @@ index b99ff86c8..46c341e7f 100644
      raise RuntimeError(f"cannot locate {lib_name} after attempted paths {paths}")
  
 diff --git a/triton/backends/nvidia/driver.py b/triton/backends/nvidia/driver.py
-index 751ca1796..4145a83de 100644
+index e6fd6a9..8a53c50 100644
 --- a/triton/backends/nvidia/driver.py
 +++ b/triton/backends/nvidia/driver.py
-@@ -24,7 +24,11 @@ def libcuda_dirs():
-     if env_libcuda_path:
+@@ -23,7 +23,11 @@ def libcuda_dirs():
+     if env_libcuda_path := knobs.nvidia.libcuda_path:
          return [env_libcuda_path]
  
--    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
+-    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode(errors="ignore")
 +    # PATCH: ldconfig fails on NixOS
 +    try:
-+        libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
++        libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode(errors="ignore")
 +    except FileNotFoundError:
 +        libs = ""
      # each line looks like the following:
      # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
      locs = [line.split()[-1] for line in libs.splitlines() if "libcuda.so.1" in line]
-@@ -32,6 +36,9 @@ def libcuda_dirs():
+@@ -31,6 +35,9 @@ def libcuda_dirs():
      env_ld_library_path = os.getenv("LD_LIBRARY_PATH")
      if env_ld_library_path and not dirs:
          dirs = [dir for dir in env_ld_library_path.split(":") if os.path.exists(os.path.join(dir, "libcuda.so.1"))]
