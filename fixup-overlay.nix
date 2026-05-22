@@ -15,12 +15,12 @@ final: prev: {
     let
       cuda-loader-helper = callPackage ./cuda-loader-helper { };
     in
-    prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
-      patchelfFlags = [
-        "--add-needed ${cuda-loader-helper}/lib/cuda_loader_helper.so"
-      ];
-      appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
-    });
+      prev.nvidia-cuda-runtime-cu12.overrideAttrs (old: {
+        patchelfFlags = [
+          "--add-needed ${cuda-loader-helper}/lib/cuda_loader_helper.so"
+        ];
+        appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
+      });
   nvidia-cusparse-cu12 = prev.nvidia-cusparse-cu12.overrideAttrs (old: {
     preFixup =
       (old.preFixup or "")
@@ -55,19 +55,19 @@ final: prev: {
     let
       cudaEnabled = stdenv.isLinux;
     in
-    {
-      cudaDependencies = map (name: final.${name}) (
-        builtins.filter (name: cudaEnabled && lib.hasPrefix "nvidia-" name) (builtins.attrNames prev)
-      );
-      autoPatchelfIgnoreMissingDeps = [ "libcuda.so.1" ];
-      preFixup =
-        (old.preFixup or "")
-        + ''
+      {
+        cudaDependencies = map (name: final.${name}) (
+          builtins.filter (name: cudaEnabled && lib.hasPrefix "nvidia-" name) (builtins.attrNames prev)
+        );
+        autoPatchelfIgnoreMissingDeps = [ "libcuda.so.1" ];
+        preFixup =
+          (old.preFixup or "")
+          + ''
           for dep in $cudaDependencies;do
             addAutoPatchelfSearchPath $(find $dep/lib/python*/site-packages -type d -name lib)
           done
         '';
-    }
+      }
   );
   pybars3 = prev.pybars3.overrideAttrs (p: {
     nativeBuildInputs = p.nativeBuildInputs ++ [ final.setuptools ];
@@ -168,4 +168,49 @@ final: prev: {
         addAutoPatchelfSearchPath ${final.torch}/lib/python*/site-packages/torch/lib
       '';
   });
+
+  nvidia-cufile = prev.nvidia-cufile.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [
+      rdma-core
+    ];
+  });
+  nvidia-nvshmem-cu13 = prev.nvidia-nvshmem-cu13.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [
+      libfabric
+      pmix
+      mpi
+      rdma-core
+    ];
+  });
+  nvidia-cusparse = prev.nvidia-cusparse.overrideAttrs (old: {
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        addAutoPatchelfSearchPath ${final.nvidia-nvjitlink}/lib/python*/site-packages/nvidia/cu*/lib/
+      '';
+  });
+  nvidia-cusolver = prev.nvidia-cusolver.overrideAttrs (old: {
+    cudaDependencies = with final; [
+      nvidia-nvjitlink
+      nvidia-cublas
+      nvidia-cusparse
+    ];
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        for dep in $cudaDependencies;do
+          addAutoPatchelfSearchPath $dep/lib/python*/site-packages/nvidia/*/lib/
+        done
+      '';
+  });
+  nvidia-cuda-runtime =
+    let
+      cuda-loader-helper = callPackage ./cuda-loader-helper { };
+    in
+      prev.nvidia-cuda-runtime.overrideAttrs (old: {
+        patchelfFlags = [
+          "--add-needed ${cuda-loader-helper}/lib/cuda_loader_helper.so"
+        ];
+        appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
+      });
 }
