@@ -213,4 +213,7 @@ final: prev: {
         ];
         appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
       });
+  nvidia-cudnn-cu13 = prev.nvidia-cudnn-cu13.overrideAttrs (old: {
+    appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
+  });
 }
