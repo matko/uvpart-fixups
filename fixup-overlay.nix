@@ -216,4 +216,13 @@ final: prev: {
   nvidia-cudnn-cu13 = prev.nvidia-cudnn-cu13.overrideAttrs (old: {
     appendRunpaths = (old.appendRunpaths or [ ]) ++ [ "$ORIGIN" ];
   });
+  sam2 = prev.sam2.overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or []) ++ [final.setuptools];
+  });
+  iopath = prev.iopath.overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or []) ++ [final.setuptools];
+  });
+  pyvips = prev.pyvips.overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or []) ++ [final.setuptools];
+  });
 }
