@@ -152,14 +152,26 @@ in
           # "nvcc" -- another silent return to PATH.
           substituteInPlace $out/lib/python*/site-packages/torch/_inductor/codegen/cuda/compile_utils.py \
             --replace-fail '    return "nvcc"' '    return "${cudaPackages_13.cudatoolkit}/bin/nvcc"'
-          # GCC 15 rejects this line of torch 2.11's headers in nvcc's host pass
+          # GCC 15 rejects torch 2.11's decltype form of this line in nvcc's host pass
           # ([-Wtemplate-body]: a "need typename" error on a typename that is already
           # written), which fails every CUDA JIT compile. Plain g++ accepts it, so it
           # only bites through nvcc, and neither -fpermissive nor
           # -Wno-error=template-body helps. A vector's difference_type is ptrdiff_t, so
-          # the cast keeps its meaning; drop this line when torch ships the fix.
-          substituteInPlace $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h \
-            --replace-fail 'static_cast<typename decltype(impl_->list)::difference_type>(pos)' 'static_cast<std::ptrdiff_t>(pos)'
+          # the cast keeps its meaning.
+          #
+          # 2.13 replaced the decltype with c10::detail::ListImpl::list_type, which
+          # GCC 15 takes, so the workaround is skipped there. Any third form is an
+          # upstream change this does not know about, and fails the build rather than
+          # passing it through unchecked.
+          if grep -q "static_cast<typename decltype(impl_->list)::difference_type>(pos)" \
+              $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h; then
+            substituteInPlace $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h \
+              --replace-fail 'static_cast<typename decltype(impl_->list)::difference_type>(pos)' 'static_cast<std::ptrdiff_t>(pos)'
+          elif ! grep -q "c10::detail::ListImpl::list_type::difference_type>(pos)" \
+              $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h; then
+            echo "List_inl.h has neither the GCC 15 workaround's target nor the form torch 2.13 uses: check upstream, then update fixup-overlay.nix" >&2
+            exit 1
+          fi
         '';
       }
   );
