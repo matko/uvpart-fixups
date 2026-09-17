@@ -584,6 +584,9 @@ in
   # rather than by a guard per package, since different locks carry different subsets.
   # setuptools-rust is here for its own build, not for what it provides: it imports
   # setuptools while declaring only the requirements of the crates it builds.
+  # The names below were each added when a build failed on the same import. They are
+  # deliberately individual rather than matched by a prefix: a package that fails this
+  # way should be named, so a genuinely different problem is not swept up with it.
   map
     (name: {
       inherit name;
@@ -603,6 +606,13 @@ in
       "tokenicer"
       "pluggy"
       "setuptools-rust"
+      "axolotl-contribs-lgpl"
+      "axolotl-contribs-mit"
+      # Legacy sdists with no pyproject.toml at all, found by auditing a lock's
+      # sdist-only packages and by the builds that failed on them.
+      "rouge-score"
+      "sqlitedict"
+      "word2number"
     ])
 )
 // lib.optionalAttrs (prev ? pypcre) {
