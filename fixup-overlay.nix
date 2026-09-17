@@ -14,9 +14,47 @@
   cmake,
   ninja,
   patchelf,
+  ffmpeg,
+  libheif,
+  z3,
   cudaPackages_13,
 }:
-final: prev: {
+final: prev:
+let
+  # The nvidia-* wheels ship their libraries under nvidia/<component>/lib, which
+  # autoPatchelf does not search.
+  cudaDependencies = map (name: final.${name}) (
+    builtins.filter (name: lib.hasPrefix "nvidia-" name) (builtins.attrNames prev)
+  );
+
+  # Wheels with compiled CUDA extensions keep much of what they link in sibling
+  # packages: torch's libraries (site-packages/torch/lib), the CUDA runtime libraries
+  # inside the nvidia-* wheels (nvidia/<component>/lib) and, in a few cases, the TVM
+  # FFI library. None of those are directories autoPatchelf searches, and without
+  # them the build fails outright rather than shipping a broken .so.
+  #
+  # libcuda.so.1 is the driver: no sandbox can provide it, so the reference is left
+  # unresolved and satisfied at run time by the preloader every CUDA package here
+  # relies on (cuda-loader-helper/).
+  withCudaLibs = pkg: pkg.overrideAttrs (old: {
+    inherit cudaDependencies;
+    autoPatchelfIgnoreMissingDeps = (old.autoPatchelfIgnoreMissingDeps or [ ]) ++ [ "libcuda.so.1" ];
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        addAutoPatchelfSearchPath ${final.torch}/lib/python*/site-packages/torch/lib
+      ''
+      + lib.optionalString (prev ? apache-tvm-ffi) ''
+        addAutoPatchelfSearchPath ${final.apache-tvm-ffi}/lib/python*/site-packages/tvm_ffi/lib
+      ''
+      + ''
+        for dep in $cudaDependencies; do
+          addAutoPatchelfSearchPath $(find $dep/lib/python*/site-packages -type d -name lib)
+        done
+      '';
+  });
+in
+{
   nvidia-cuda-runtime-cu12 =
     let
       cuda-loader-helper = callPackage ./cuda-loader-helper { };
@@ -167,13 +205,7 @@ final: prev: {
       rdma-core
     ];
   });
-  torchvision = prev.torchvision.overrideAttrs (old: {
-    preFixup =
-      (old.preFixup or "")
-      + ''
-        addAutoPatchelfSearchPath ${final.torch}/lib/python*/site-packages/torch/lib
-      '';
-  });
+  torchvision = withCudaLibs prev.torchvision;
 
   nvidia-cufile = prev.nvidia-cufile.overrideAttrs (old: {
     buildInputs = (old.buildInputs or [ ]) ++ [
@@ -314,4 +346,121 @@ final: prev: {
             done
           '';
       });
+}
+// lib.optionalAttrs (prev ? tokenspeed-mla) {
+  # tokenspeed-mla (a vllm dependency on linux) ships prebuilt kernels. The objects
+  # in the wheel are sm_100a/sm_103a, so they are never dlopened on Ada, but the
+  # wheel still has to patch cleanly, which it does now that the sibling-package
+  # libraries it links (cutlass DSL, TVM FFI) are on the search path.
+  tokenspeed-mla = withCudaLibs prev.tokenspeed-mla;
+}
+// lib.optionalAttrs (prev ? torchaudio) {
+  torchaudio = withCudaLibs prev.torchaudio;
+}
+// lib.optionalAttrs (prev ? pynvvideocodec) {
+  pynvvideocodec = withCudaLibs prev.pynvvideocodec;
+}
+// lib.optionalAttrs (prev ? torchcodec) {
+  # torchcodec ships one core/custom_ops module pair per ffmpeg major (4..9) and at
+  # import tries them newest first, so only the pair matching the ffmpeg provided
+  # here is ever loaded. autoPatchelf is all-or-nothing, and the other pairs link
+  # ffmpeg libraries this environment does not have, so drop them.
+  torchcodec = (withCudaLibs prev.torchcodec).overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [ ffmpeg libheif ];
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        ffmpegMajor=${lib.versions.major ffmpeg.version}
+        find $out/lib/python*/site-packages/torchcodec -name 'libtorchcodec_*[0-9].so' \
+          ! -name "libtorchcodec_core$ffmpegMajor.so" \
+          ! -name "libtorchcodec_custom_ops$ffmpegMajor.so" \
+          -delete
+      '';
+  });
+}
+// lib.optionalAttrs (prev ? torch-c-dlpack-ext) {
+  # Its wheel installs a top-level build_backend.py, a helper for building the
+  # per-torch addons, which collides with flashinfer-python's module of the same
+  # name when the environment is assembled. Nothing imports it at run time -- the
+  # addons ship prebuilt -- so drop it and keep flashinfer's, which its JIT uses.
+  torch-c-dlpack-ext = (withCudaLibs prev.torch-c-dlpack-ext).overrideAttrs (old: {
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        rm -f $out/lib/python*/site-packages/build_backend.py
+      '';
+  });
+}
+// lib.optionalAttrs (prev ? nvidia-cutlass-dsl-libs-base && prev ? nvidia-cutlass-dsl-libs-cu13) {
+  # The cutlass DSL splits into a base wheel and a cu13 wheel which ship the same
+  # nvidia_cutlass_dsl tree with different contents for some files; pip installs them
+  # in sequence and lets the cu13 one overwrite, while the environment assembly here
+  # refuses to merge differing files. Drop exactly the files the cu13 wheel also
+  # provides, leaving base's unique ones and letting cu13 win where they disagree.
+  nvidia-cutlass-dsl-libs-base = prev.nvidia-cutlass-dsl-libs-base.overrideAttrs (old: {
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        sp=$(echo $out/lib/python*/site-packages)
+        cu13=$(echo ${final.nvidia-cutlass-dsl-libs-cu13}/lib/python*/site-packages)
+        if [ -d "$sp/nvidia_cutlass_dsl" ] && [ -d "$cu13/nvidia_cutlass_dsl" ]; then
+          cd "$sp"
+          find nvidia_cutlass_dsl -type f | while read -r f; do
+            if [ -e "$cu13/$f" ] && ! cmp -s "$f" "$cu13/$f"; then
+              rm -f "$f"
+            fi
+          done
+        fi
+      '';
+  });
+}
+// lib.optionalAttrs (prev ? flashinfer-python) {
+  # flashinfer JIT-compiles a few small ops on first use (vllm's sampler is one) and
+  # links them with -L$CUDA_HOME/lib64 and -L$CUDA_HOME/lib64/stubs -- the NVIDIA
+  # toolkit layout. nixpkgs ships the same libraries as lib/ and lib/stubs, so the
+  # link dies with "cannot find -lcuda" and the engine never finishes starting.
+  flashinfer-python = (withCudaLibs prev.flashinfer-python).overrideAttrs (old: {
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        substituteInPlace $out/lib/python*/site-packages/flashinfer/jit/cpp_ext.py \
+          --replace-fail '"-L$cuda_home/lib64",' '"-L$cuda_home/lib",' \
+          --replace-fail '"-L$cuda_home/lib64/stubs",' '"-L$cuda_home/lib/stubs",'
+      '';
+  });
+}
+// lib.optionalAttrs (prev ? xgrammar) {
+  xgrammar = withCudaLibs prev.xgrammar;
+}
+// lib.optionalAttrs (prev ? tilelang) {
+  # tilelang bundles libtvm.so, which links Z3 for its expression simplifier. The
+  # z3-solver wheel that comes with it is a python package, not the library TVM was
+  # linked against.
+  tilelang = (withCudaLibs prev.tilelang).overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [ z3 ];
+  });
+}
+// lib.optionalAttrs (prev ? tokenspeed-triton) {
+  tokenspeed-triton = withCudaLibs prev.tokenspeed-triton;
+}
+// lib.optionalAttrs (prev ? vllm) {
+  # vllm's compiled extensions link torch and the CUDA runtime libraries from the
+  # nvidia-* wheels; the driver itself is reached through the preloading every other
+  # CUDA package here uses (cuda-loader-helper, loaded with torch's cudart).
+  #
+  # Its vendored pynvml, though, loads NVML by bare soname only, and NixOS keeps the
+  # driver outside the loader's search path. That failure is well hidden: vllm's CUDA
+  # platform plugin catches the exception, returns None, vllm falls back to "no
+  # platform" and dies later with "Device string must not be empty". Accept the
+  # system driver path, keeping the bare name for everywhere else.
+  vllm =
+    (withCudaLibs prev.vllm).overrideAttrs (old: {
+      preFixup =
+        (old.preFixup or "")
+        + ''
+          substituteInPlace $out/lib/python*/site-packages/vllm/third_party/pynvml.py \
+            --replace-fail 'nvmlLib = CDLL("libnvidia-ml.so.1")' \
+            'nvmlLib = CDLL("/run/opengl-driver/lib/libnvidia-ml.so.1") if os.path.exists("/run/opengl-driver/lib/libnvidia-ml.so.1") else CDLL("libnvidia-ml.so.1")'
+        '';
+    });
 }

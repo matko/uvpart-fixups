@@ -190,7 +190,11 @@ def _build(
     ]
     if needs_cuda and os.environ.get("CC"):
         cuda_flags = ["-ccbin", os.environ["CC"], *cuda_flags]
-    if needs_cuda and not any(flag.startswith("-std=") for flag in cuda_flags):
+    if needs_cuda:
+        # Appended last so it wins over what the extension declares: gptqmodel asks
+        # nvcc for c++17, but torch's headers rely on the C++20 relaxation of the
+        # typename rule in dependent scopes, the same way the host compile line above
+        # does. Without this the AWQ/GPTQ kernel builds fail inside torch's headers.
         cuda_flags.append("-std=c++20")
 
     def compile_source(source: Path) -> Path:

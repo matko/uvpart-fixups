@@ -80,3 +80,56 @@ CUDA build from a CPU one:
 $ python -c "import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"
 True
 ```
+
+## vllm (automatic, one project-side prerequisite)
+
+`vllm` drags in a large CUDA dependency tree, and most of the work is telling
+autoPatchelf where the sibling packages keep their libraries: torch's (under
+`site-packages/torch/lib`), the CUDA runtime libraries inside the nvidia-* wheels,
+and the cutlass DSL and TVM FFI runtimes. One `withCudaLibs` helper in
+`fixup-overlay.nix` adds those search paths and leaves the `libcuda.so.1` reference
+unresolved, so the driver is preloaded at run time as everywhere else here. The
+wheels that need more than that get their own entry:
+
+- `torchvision`, `torchaudio`, `torch-c-dlpack-ext`, `xgrammar`, `flashinfer-python`,
+  `tilelang`, `tokenspeed-mla`, `tokenspeed-triton`, `pynvvideocodec`, `vllm`
+- `torchcodec` also links ffmpeg and libheif, and ships one core/custom_ops module
+  pair per ffmpeg major; only the pair matching the ffmpeg provided here is kept
+- `tilelang` bundles `libtvm.so`, which links Z3
+- `nvidia-cutlass-dsl-libs-base` and `-libs-cu13` ship the same tree with different
+  contents (pip lets the cu13 wheel overwrite); the base copy keeps only the files
+  that differ
+- `vllm`'s vendored pynvml loads NVML by bare soname, which NixOS keeps out of the
+  loader's search path. That failure hides well: the CUDA platform plugin swallows
+  it, reports no platform, and the engine dies later with "Device string must not be
+  empty"
+- `flashinfer-python`'s JIT links with `$CUDA_HOME/lib64`, but nixpkgs ships `lib/`
+  and `lib/stubs`, so any JIT-compiled op (vllm's sampler is one) failed to link
+  with `cannot find -lcuda`
+
+### Project-side prerequisite
+
+vllm JIT-compiles a few small kernels the first time it runs them, so the *shell*
+needs a compiler and a toolkit, not just the packages:
+
+```nix
+uvpart.extraPackages = [ pkgs.cudaPackages_13.cudatoolkit pkgs.ninja pkgs.gcc ];
+```
+
+Without it the engine dies with `Could not find nvcc and default
+cuda_home='/usr/local/cuda' doesn't exist`. The first generation pays a one-off
+compile into `~/.cache/flashinfer`, after which the result is reused.
+
+Precompiling those kernels at build time, the way `gptqmodel-ops` does for the marlin
+kernels, is possible but awkward here: which ops are needed depends on the model and
+the attention backend, and the build sandbox has no GPU to detect an architecture
+from.
+
+### Worth knowing before adding vllm to an existing project
+
+vllm pins torch exactly and trails it by a couple of releases, while gptqmodel
+requires `protobuf>=7.34.0`; vllm 0.26+ depends on an `nvidia-cutlass-dsl` whose
+`libs-base` sidecar caps protobuf below 7. The two cannot coexist, so in one
+environment the newest usable combination is vllm 0.25.1 with torch 2.11. A project
+that wants newer vllm has to give up gptqmodel (vllm ships its own GPTQ/AWQ/Marlin
+kernels) or split it into its own environment.
