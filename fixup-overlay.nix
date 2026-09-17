@@ -316,6 +316,31 @@ in
     NVCC_THREADS = "4";
   });
 }
+// lib.optionalAttrs (prev ? causal-conv1d) {
+  # causal-conv1d publishes no wheels, so uv2nix builds it from the sdist and its
+  # setup.py wants a CUDA toolchain in the build sandbox. CUDA_HOME and the arch
+  # follow the flash-attn entry above: setup.py emits gencode from
+  # TORCH_CUDA_ARCH_LIST, and 8.0 cubins run on Ada through CUDA's minor-version
+  # binary compatibility, so those and NVCC_THREADS are the lines to widen for other
+  # GPUs.
+  #
+  # The Python build dependencies (torch, setuptools, wheel, packaging, ninja) have
+  # to be declared, since setup.py has no pyproject.toml to declare them in:
+  #   [tool.uv.extra-build-dependencies]
+  #   "causal-conv1d" = ["torch", "setuptools", "wheel", "packaging", "ninja"]
+  causal-conv1d = prev.causal-conv1d.overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+      cudaPackages_13.cudatoolkit
+    ];
+    CUDA_HOME = "${cudaPackages_13.cudatoolkit}";
+    TORCH_CUDA_ARCH_LIST = "8.0";
+    NVCC_THREADS = "4";
+    # Otherwise setup.py tries to fetch a prebuilt wheel from GitHub, which cannot
+    # work in the sandbox. PyPI's torch is cxx11-ABI.
+    CAUSAL_CONV1D_FORCE_BUILD = "TRUE";
+    CAUSAL_CONV1D_FORCE_CXX11_ABI = "TRUE";
+  });
+}
 // lib.optionalAttrs (prev ? llama-cpp-python) {
   # llama-cpp-python compiles the llama.cpp it vendors, through scikit-build-core.
   # ggml defaults GGML_CUDA to off, and CMake cannot detect an architecture when the

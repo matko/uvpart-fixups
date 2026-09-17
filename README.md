@@ -94,6 +94,23 @@ require. Arch selection is a one-line change in `fixup-overlay.nix`
 (`FLASH_ATTN_CUDA_ARCHS` / `TORCH_CUDA_ARCH_LIST`), currently `80` — Ampere cubins
 run on Ada via CUDA's minor-version binary compatibility.
 
+## causal-conv1d (automatic, one pyproject stanza)
+
+`causal-conv1d` publishes no wheels, so uv2nix builds it from the sdist and its
+`setup.py` wants a CUDA toolchain in the build sandbox. Like flash-attn it has no
+`pyproject.toml`, so nothing declares what its build needs:
+
+```toml
+[tool.uv.extra-build-dependencies]
+"causal-conv1d" = ["torch", "setuptools", "wheel", "packaging", "ninja"]
+```
+
+With that stanza the fixup is automatic — no `pythonOverlays` stanza of your own. The
+overlay supplies the toolkit, forces the source build (the prebuilt-wheel download
+cannot work in a sandbox) and sets the cxx11 ABI, which is what PyPI's torch uses.
+Arch selection follows the flash-attn entry: `TORCH_CUDA_ARCH_LIST` is `8.0`, whose
+cubins run on Ada via CUDA's minor-version binary compatibility.
+
 ## llama-cpp-python (automatic, one pyproject stanza)
 
 `llama-cpp-python` compiles the llama.cpp it vendors, through `scikit-build-core`.
