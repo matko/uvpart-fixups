@@ -495,6 +495,7 @@ in
     })
     (builtins.filter (name: builtins.hasAttr name prev) [
       "defuser"
+      "libcst"
       "pyyaml-ft"
       "trove_classifiers"
       "trove-classifiers"
@@ -554,6 +555,28 @@ in
   # Links torch's libraries and a CUDA runtime, like the other compiled wheels.
   xformers = withCudaLibs "xformers" prev.xformers;
 }
+// builtins.listToAttrs (
+  # Sdists that build a Rust extension and forget setuptools-rust, which is the module
+  # they import; libcst needs setuptools as well, so that list is omitted for it here.
+  #
+  # A package must appear in exactly ONE list below: each list is its own
+  # overrideAttrs on prev.<name>, and attrset // makes the later one win outright,
+  # silently discarding the earlier one's nativeBuildInputs.
+  map
+    (name: {
+      inherit name;
+      value = prev.${name}.overrideAttrs (p: {
+        nativeBuildInputs = (p.nativeBuildInputs or [ ]) ++ [
+          final.setuptools
+          final."setuptools-rust"
+          final."semantic-version"
+        ];
+      });
+    })
+    (builtins.filter (name: builtins.hasAttr name prev) [
+      "libcst"
+    ])
+)
 // lib.optionalAttrs (prev ? torchao) {
   torchao = withCudaLibs "torchao" prev.torchao;
 }
