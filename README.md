@@ -156,12 +156,24 @@ $ python -c "import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"
 True
 ```
 
-## JIT at run time: the toolchain is baked in, not put on PATH
+## JIT at run time (when the lock carries a CUDA toolkit)
 
-A dev shell can hand nvcc, ninja and a host compiler to a JIT by putting them on
-PATH, but a deployed program gets neither that PATH nor CUDA_HOME: environment
-variables belong to the invocation, not to the artifact. The packages that compile at
-run time therefore carry the tools inside their own lookups, as absolute store paths:
+Some packages compile CUDA C++ on first use instead of linking a prebuilt kernel:
+vllm's sampler and its other `cpp_extension` ops, flashinfer's JIT kernels, tilelang's
+DSL, and inductor's nvcc path. Triton-based kernels do not — unsloth, liger-kernel,
+flash-linear-attention and plain triton compile through `ptxas`, which the triton wheel
+ships, and need only the driver, which the preloader provides.
+
+There is nothing to opt into. The toolchain is applied whenever the environment carries
+the CUDA components, so a project that compiles CUDA C++ at run time gets it by depending
+on them, and a project that does not is left alone entirely — no toolkit in its closure,
+no unfree reference. Which components those are, and why they have to be pinned together,
+is further down.
+
+A dev shell can hand nvcc, ninja and a host compiler to a JIT by putting them on PATH,
+but a deployed program gets neither that PATH nor CUDA_HOME: environment variables belong
+to the invocation, not to the artifact. The toolchain is therefore written into the
+packages' own lookups as absolute store paths:
 
 | package | lookups repointed |
 | --- | --- |
@@ -173,6 +185,60 @@ run time therefore carry the tools inside their own lookups, as absolute store p
 needs none either: it ships its own ptxas and only wants the driver, which the
 preloader already handles. Every environment variable is still read first, so
 CUDA_HOME and CXX still override deliberately.
+
+The tree is a merge of `cuda_nvcc`, `cuda_cudart` and `cuda_crt`, about 683 MiB together,
+rather than `cudaPackages_13.cudatoolkit` at about 2.6 GiB. The merged toolkit's `bin/nvcc`
+is a symlink to `cuda_nvcc`'s, so the compiler is the same one, `cuda_cudart` brings
+`include/cuda_runtime.h` and `cuda_crt` the `crt/` headers it includes. What the merged
+toolkit adds is cublas, cufft, nvrtc and friends, which nothing here links, because torch
+takes its runtime libraries from the `nvidia-*` wheels.
+
+The merge is plain: no copied binary, no rewritten profile. A compiler here needs nothing
+rewritten, because it keeps its own installation-relative lookups and the tree's `include/`
+reaches it through the `-isystem $CUDA_HOME/include` that the callers pass — torch,
+flashinfer and tilelang all do, and that is what makes the merge sufficient. A bare `nvcc`
+from this tree does *not* find `cuda_runtime.h`, since its own profile points at the
+`cuda_nvcc` package's include; the callers are the interface.
+
+Building the tree from the CUDA wheels instead was tried, and it does not work — worth
+recording, because it looks like it should. The wheels do ship a whole compiler
+(`bin/nvcc`, `bin/ptxas`, `bin/nvlink`, `cudafe++`, `fatbinary`, `nvvm/bin/cicc`) and
+`NVCC_CCBIN` supplies the host compiler they lack. What they cannot supply is coherence: a
+compiler and *every* header it consumes have to come from one CTK release, and the lock
+cannot arrange that. torch pins `nvidia-cuda-runtime` to 13.0.96, so a wheel-assembled tree
+pairs a 13.2.86 nvcc and cccl with 13.0.96 runtime headers, and cccl refuses the
+combination at compile time:
+
+```console
+…cuda-jit/bin/../include/cccl/cuda/std/__cccl/cuda_toolkit.h:41:8: error: #error "CUDA compiler and CUDA toolkit headers are incompatible, please check your include paths"
+```
+
+That is the version-skew failure NVIDIA documents for CUDA wheel installs, reproduced here
+even with `nvidia-cuda-nvcc`, `nvidia-cuda-crt`, `nvidia-cuda-cccl` and `nvidia-nvvm` all
+pinned to 13.2.86: the runtime headers are the layer that cannot be moved, and pinning the
+runtime to 13.2.86 instead is unsatisfiable against torch's own pin. The component pin is
+still worth keeping, because it removes the *other* skew — where cccl floats releases ahead
+of the compiler, `humming-kernels`' `cu13` extra pinning nvcc and leaving cccl, crt and
+nvrtc unpinned.
+
+A nixpkgs component set is coherent by construction and independent of torch's pins, at
+683 MiB against the wheels' 318 MiB installed. Because the compile never reads the
+`nvidia-*` include paths, the versions of those wheels cannot affect it: a project may carry
+them drifted, or not at all, and still compile — which is what makes a component pin
+unnecessary. The scope of that separation is everything compiling through the patched
+lookups, i.e. through `CUDA_HOME`. A consumer that reads the wheel tree directly —
+`cuda-python`'s `cu13` extra, `cuda.core`/`cuda.cccl` style helpers — is not patched, and for
+those the wheel versions still have to agree.
+
+nixpkgs' `cuda_nvcc` also needs no host compiler variable: measured, it resolves one with an
+empty environment *and* with its profile disabled (`-noprof`), so the default is in the binary
+— nvcc here is a redistribution, so that is a patch nixpkgs applies. The wheels are the
+better route for a project that can pin one whole toolkit release, which is not a project
+whose torch pins the runtime. Two details if that route is ever taken: the unversioned
+`lib/libcudart.so` has to be linked beside `libcudart.so.13` (`lib/stubs` is not needed, a
+torch extension asks only for `-lcudart`), and since nvcc resolves its installation relative
+to its real executable, the tree needs `nvvm`, `include` and `lib` beside a *copy* of the
+binary rather than a symlink to it.
 
 Because a store path occurring in a file counts as a reference, the toolkit, ninja and
 the compiler enter those derivations' closures, so whatever deploys the environment

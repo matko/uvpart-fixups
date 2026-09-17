@@ -18,6 +18,7 @@
   libheif,
   pcre2,
   z3,
+  symlinkJoin,
   cudaPackages_13,
 }:
 final: prev:
@@ -65,6 +66,64 @@ let
             done
           '';
       });
+  # The runtime JIT toolchain. Only a project that compiles CUDA C++ at run time wants
+  # it: vllm's cpp_extension ops, flashinfer's kernels, tilelang's DSL, inductor's nvcc
+  # path. Triton-based kernels need ptxas and the driver instead, which the triton wheel
+  # and the preloader already provide.
+  #
+  # There is no opt-in flag. The toolchain applies when the environment carries these
+  # CUDA components, which is the same condition as "this project compiles CUDA C++": a
+  # project that does not carry them is left entirely alone, with no toolkit and no
+  # unfree reference in its closure.
+  #
+  # The tree comes from nixpkgs rather than from those wheels. A compiler and every
+  # header it consumes have to come from one CTK release, and the wheels cannot supply
+  # that here: the lock pins nvidia-cuda-runtime to what torch wants (13.0.96), so a
+  # wheel-assembled tree pairs a 13.2.86 nvcc and cccl with 13.0.96 runtime headers, and
+  # cccl rejects the combination at compile time -- "CUDA compiler and CUDA toolkit
+  # headers are incompatible", the version-skew failure NVIDIA documents for CUDA wheel
+  # installs. Measured, not assumed: the guard fires even when cccl, crt and nvvm are
+  # pinned to the compiler's own release, because the runtime headers are the part that
+  # cannot be moved. A nixpkgs component set is coherent by construction and independent
+  # of torch's pins, which makes 683 MiB of cuda_nvcc + cuda_cudart + cuda_crt both
+  # cheaper than 2.6 GiB of merged cudatoolkit and more useful than a wheel tree that
+  # cannot compile.
+  #
+  # The merge is a plain symlinkJoin: nvcc keeps its own profile and its own
+  # installation-relative lookups, and the tree's include/ reaches it through the
+  # -isystem $CUDA_HOME/include that the callers pass (torch, flashinfer, tilelang all
+  # do). That is why no copied binary and no rewritten profile are needed here, unlike
+  # the wheel tree, where the profile had to be redirected.
+  cudaJitPresent = builtins.all (n: prev ? ${n}) [
+    "nvidia-cuda-nvcc"
+    "nvidia-cuda-crt"
+    "nvidia-cuda-cccl"
+    "nvidia-nvvm"
+    "nvidia-cuda-runtime"
+  ];
+  # uvpart.cudaJitToolchain can override that proxy, since a proxy is wrong in both
+  # directions: true for a project that compiles CUDA C++ without carrying the components,
+  # false for one that carries them without compiling, and null -- the default -- for the
+  # presence test above, which is how the common case needs no configuration at all.
+  cudaJitMode = final.__uvpart-cuda-jit-toolchain or null;
+  cudaJitEnabled =
+    if cudaJitMode == false then
+      false
+    else if cudaJitMode == true then
+      true
+    else
+      cudaJitPresent;
+  cudaJit = symlinkJoin {
+    name = "cuda-jit";
+    paths = [
+      cudaPackages_13.cuda_nvcc
+      cudaPackages_13.cuda_cudart
+      # cuda_runtime.h includes crt/host_config.h, which lives in cuda_crt: a merge
+      # without it compiles the host pass and then dies in nvcc's include of the runtime
+      # header. cuda_cccl needs no merging, since nvcc's own profile reaches it.
+      cudaPackages_13.cuda_crt
+    ];
+  };
 in
 {
   nvidia-cuda-runtime-cu12 =
@@ -111,30 +170,6 @@ in
           builtins.filter (name: cudaEnabled && lib.hasPrefix "nvidia-" name) (builtins.attrNames prev)
         );
         autoPatchelfIgnoreMissingDeps = [ "libcuda.so.1" ];
-        # JIT compilation at run time needs nvcc, ninja and a host compiler, and a dev
-        # shell cannot supply them to a deployed program: PATH and CUDA_HOME belong to
-        # the invocation, not to the artifact. Baking absolute store paths into torch's
-        # lookups makes the environment self-sufficient on its own -- and since a store
-        # path occurring in a file counts as a reference, the toolkit, ninja and the
-        # compiler land in this derivation's closure, so whatever deploys the
-        # environment deploys the tools with it.
-        #
-        # torch is the only place this has to happen for vllm, whose JIT compiles
-        # through cpp_extension; triton ships its own ptxas and needs only the driver,
-        # which is patched elsewhere. flashinfer and tilelang carry their own copies of
-        # the same lookups (see their entries below). nvcc itself needs no help finding
-        # gcc: nixpkgs points its compiler-bindir at the nixpkgs compiler at build time,
-        # so a .cu still compiles with PATH=/nonexistent.
-        #
-        # Every tool invocation in the file was enumerated rather than patched as found:
-        # the CUDA_HOME guess, the ninja command, the ninja availability probe and the
-        # host compiler. Everything else already uses an absolute path once CUDA_HOME is
-        # right (nvcc comes from $CUDA_HOME/bin).
-        #
-        # The environment variables are still consulted first, so CUDA_HOME and CXX can
-        # override deliberately. --replace-fail rather than --replace on purpose: these
-        # are upstream lines that move between releases, and a silent no-op would put
-        # the lookups quietly back on PATH.
         preFixup =
           (old.preFixup or "")
           + ''
@@ -142,37 +177,33 @@ in
             addAutoPatchelfSearchPath $(find $dep/lib/python*/site-packages -type d -name lib)
           done
         ''
-          + ''
-          substituteInPlace $out/lib/python*/site-packages/torch/utils/cpp_extension.py \
-            --replace-fail "'/usr/local/cuda'" "'${cudaPackages_13.cudatoolkit}'" \
-            --replace-fail "['ninja', '-v']" "['${ninja}/bin/ninja', '-v']" \
-            --replace-fail "['ninja', '--version']" "['${ninja}/bin/ninja', '--version']" \
-            --replace-fail "os.environ.get('CXX', 'c++')" "os.environ.get('CXX', '${stdenv.cc}/bin/c++')"
-          # Inductor has its own compiler picker, whose last resort is the bare name
-          # "nvcc" -- another silent return to PATH.
-          substituteInPlace $out/lib/python*/site-packages/torch/_inductor/codegen/cuda/compile_utils.py \
-            --replace-fail '    return "nvcc"' '    return "${cudaPackages_13.cudatoolkit}/bin/nvcc"'
-          # GCC 15 rejects torch 2.11's decltype form of this line in nvcc's host pass
-          # ([-Wtemplate-body]: a "need typename" error on a typename that is already
-          # written), which fails every CUDA JIT compile. Plain g++ accepts it, so it
-          # only bites through nvcc, and neither -fpermissive nor
-          # -Wno-error=template-body helps. A vector's difference_type is ptrdiff_t, so
-          # the cast keeps its meaning.
-          #
-          # 2.13 replaced the decltype with c10::detail::ListImpl::list_type, which
-          # GCC 15 takes, so the workaround is skipped there. Any third form is an
-          # upstream change this does not know about, and fails the build rather than
-          # passing it through unchecked.
-          if grep -q "static_cast<typename decltype(impl_->list)::difference_type>(pos)" \
-              $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h; then
-            substituteInPlace $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h \
-              --replace-fail 'static_cast<typename decltype(impl_->list)::difference_type>(pos)' 'static_cast<std::ptrdiff_t>(pos)'
-          elif ! grep -q "c10::detail::ListImpl::list_type::difference_type>(pos)" \
-              $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h; then
-            echo "List_inl.h has neither the GCC 15 workaround's target nor the form torch 2.13 uses: check upstream, then update fixup-overlay.nix" >&2
-            exit 1
-          fi
-        '';
+          + lib.optionalString cudaJitEnabled ''
+            # Every lookup here is a JIT-time one. --replace-fail throughout, so an
+            # upstream change is a loud build failure rather than a silent return to PATH.
+            substituteInPlace $out/lib/python*/site-packages/torch/utils/cpp_extension.py \
+              --replace-fail "'/usr/local/cuda'" "'${cudaJit}'" \
+              --replace-fail "['ninja', '-v']" "['${ninja}/bin/ninja', '-v']" \
+              --replace-fail "['ninja', '--version']" "['${ninja}/bin/ninja', '--version']" \
+              --replace-fail "os.environ.get('CXX', 'c++')" "os.environ.get('CXX', '${stdenv.cc}/bin/c++')"
+            # Inductor has its own compiler picker, whose last resort is the bare name "nvcc".
+            substituteInPlace $out/lib/python*/site-packages/torch/_inductor/codegen/cuda/compile_utils.py \
+              --replace-fail '    return "nvcc"' '    return "${cudaJit}/bin/nvcc"'
+            # GCC 15 rejects torch 2.11's decltype form of this line in nvcc's host pass
+            # ([-Wtemplate-body]: a "need typename" error on a typename that is already
+            # written), which fails every CUDA JIT compile. A vector's difference_type is
+            # ptrdiff_t, so the cast keeps its meaning. 2.13 replaced the decltype with
+            # c10::detail::ListImpl::list_type, which GCC 15 takes, so the workaround is
+            # skipped there; any third form fails the build rather than passing through.
+            if grep -q "static_cast<typename decltype(impl_->list)::difference_type>(pos)" \
+                $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h; then
+              substituteInPlace $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h \
+                --replace-fail 'static_cast<typename decltype(impl_->list)::difference_type>(pos)' 'static_cast<std::ptrdiff_t>(pos)'
+            elif ! grep -q "c10::detail::ListImpl::list_type::difference_type>(pos)" \
+                $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h; then
+              echo "List_inl.h has neither the GCC 15 workaround's target nor the form torch 2.13 uses: check upstream, then update fixup-overlay.nix" >&2
+              exit 1
+            fi
+          '';
       }
   );
   pybars3 = prev.pybars3.overrideAttrs (p: {
@@ -524,20 +555,20 @@ in
   # toolkit layout. nixpkgs ships the same libraries as lib/ and lib/stubs, so the
   # link dies with "cannot find -lcuda" and the engine never finishes starting.
   #
-  # It also carries its own copy of the lookups torch's entry above patches: its own
-  # CUDA_HOME detection, its own cxx, its own ninja invocation. Same reasoning, so the
-  # same absolute paths. get_cuda_path() is short-circuited at the environment lookup
-  # rather than merely given a different default, because the "which nvcc" fallback
-  # runs through subprocess and would raise FileNotFoundError on a PATH without the
-  # which utility before ever reaching the default.
+  # The CUDA_HOME those flags are relative to is a JIT concern and is patched below,
+  # gated on the CUDA components being present; this entry stays because it is about
+  # linking flags, not lookups.
   flashinfer-python = (withCudaLibs "flashinfer-python" prev.flashinfer-python).overrideAttrs (old: {
     preFixup =
       (old.preFixup or "")
       + ''
         substituteInPlace $out/lib/python*/site-packages/flashinfer/jit/cpp_ext.py \
           --replace-fail '"-L$cuda_home/lib64",' '"-L$cuda_home/lib",' \
-          --replace-fail '"-L$cuda_home/lib64/stubs",' '"-L$cuda_home/lib/stubs",' \
-          --replace-fail 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")' 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "${cudaPackages_13.cudatoolkit}"' \
+          --replace-fail '"-L$cuda_home/lib64/stubs",' '"-L$cuda_home/lib/stubs",'
+      ''
+      + lib.optionalString cudaJitEnabled ''
+        substituteInPlace $out/lib/python*/site-packages/flashinfer/jit/cpp_ext.py \
+          --replace-fail 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")' 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "${cudaJit}"' \
           --replace-fail 'os.environ.get("CXX", "c++")' 'os.environ.get("CXX", "${stdenv.cc}/bin/c++")' \
           --replace-fail '"ninja",' '"${ninja}/bin/ninja",'
       '';
@@ -560,12 +591,10 @@ in
       ''
       + ''
         addAutoPatchelfSearchPath ${z3}/lib
-        # tilelang carries its own CUDA_HOME detection (tilelang/env.py) and, without a
-        # PATH, would land on the PyPI nvidia-cuda-nvcc wheel: that nvcc has no
-        # compiler-bindir, so it cannot find a host compiler either. Same reasoning as
-        # torch and flashinfer above.
+      ''
+      + lib.optionalString cudaJitEnabled ''
         substituteInPlace $out/lib/python*/site-packages/tilelang/env.py \
-          --replace-fail 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")' 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "${cudaPackages_13.cudatoolkit}"'
+          --replace-fail 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")' 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "${cudaJit}"'
       '';
   });
 }
@@ -613,6 +642,7 @@ in
       "rouge-score"
       "sqlitedict"
       "word2number"
+      "zstandard"
     ])
 )
 // lib.optionalAttrs (prev ? pypcre) {
