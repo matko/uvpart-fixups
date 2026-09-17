@@ -1,11 +1,21 @@
 # flakepart-fixups: python package fixes for use with uvpart
 
 Most entries in `fixup-overlay.nix` are applied unconditionally by `flake-module.nix`
-as `uvpart.pythonOverlays`. `flash-attn` is guarded with `lib.optionalAttrs (prev ? flash-attn)` so projects whose lock does not contain it are unaffected. The CUDA
-toolkit is unfree, so consuming projects must allow unfree packages.
+as `uvpart.pythonOverlays`. The optional ones are guarded with
+`lib.optionalAttrs (prev ? <name>)`, so a lock that does not contain that package is
+unaffected. The CUDA toolkit is unfree, so `allowUnfree` has to be enabled.
 
-Requiring packages exist in the *lock* is the general shape here: `prev.<name>` is
-only defined for packages the consuming project resolved.
+Every entry relies on the package existing in the *lock*: `prev.<name>` is only
+defined for packages the lock resolved.
+
+## sdists that forget setuptools
+
+Some packages run `setup.py` or a cffi build without declaring setuptools as a build
+dependency, so their build environment has nothing to import. They are matched by
+presence rather than by a guard each, so a lock only needs to contain the ones it
+actually uses: `defuser`, `device-smi`, `logbar`, `tokenicer` (which get setuptools)
+and `pypcre` (which also builds against PCRE2). `torchao` links torch, so it goes
+through the same `withCudaLibs` helper as the CUDA wheels below.
 
 ## gptqmodel kernels (opt-in)
 
@@ -31,11 +41,11 @@ GPTQ checkpoints resolve to the Marlin kernels. `machete`/`swordfish` are only
 reachable on sm_90+ hardware and fetch CUTLASS from the network, so they are not
 supported here.
 
-## flash-attn (automatic, one project-side prerequisite)
+## flash-attn (automatic, one pyproject stanza)
 
 `flash-attn` ships a legacy `setup.py` with no `pyproject.toml`, so nothing declares
-what its build needs. Without this stanza in the *project's* `pyproject.toml`, uv2nix
-builds it in an empty environment and `setup.py` fails on `import setuptools`:
+what its build needs. Without this stanza, uv2nix builds it in an empty environment
+and `setup.py` fails on `import setuptools`:
 
 ```toml
 [tool.uv.extra-build-dependencies]
@@ -48,12 +58,12 @@ require. Arch selection is a one-line change in `fixup-overlay.nix`
 (`FLASH_ATTN_CUDA_ARCHS` / `TORCH_CUDA_ARCH_LIST`), currently `80` — Ampere cubins
 run on Ada via CUDA's minor-version binary compatibility.
 
-## llama-cpp-python (automatic, one project-side prerequisite)
+## llama-cpp-python (automatic, one pyproject stanza)
 
 `llama-cpp-python` compiles the llama.cpp it vendors, through `scikit-build-core`.
 That sdist *does* declare its backend, but a lock which never resolved it contains no
-such package, and uv2nix then builds the package in an environment without one — so
-the project declares it, exactly as for flash-attn:
+such package, and uv2nix then builds the package in an environment without one, so it
+has to be declared too:
 
 ```toml
 [tool.uv.extra-build-dependencies]
@@ -81,7 +91,7 @@ $ python -c "import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"
 True
 ```
 
-## vllm (automatic, one project-side prerequisite)
+## vllm (automatic, one shell prerequisite)
 
 `vllm` drags in a large CUDA dependency tree, and most of the work is telling
 autoPatchelf where the sibling packages keep their libraries: torch's (under
@@ -95,10 +105,15 @@ wheels that need more than that get their own entry:
   `tilelang`, `tokenspeed-mla`, `tokenspeed-triton`, `pynvvideocodec`, `vllm`
 - `torchcodec` also links ffmpeg and libheif, and ships one core/custom_ops module
   pair per ffmpeg major; only the pair matching the ffmpeg provided here is kept
-- `tilelang` bundles `libtvm.so`, which links Z3
+- `tilelang` bundles `libtvm.so`, which links Z3 under the versioned soname its build
+  used (`libz3.so.4.15` for 0.1.12); the library comes from the `z3-solver` wheel,
+  which bundles exactly that name, with nixpkgs' z3 as the fallback
 - `nvidia-cutlass-dsl-libs-base` and `-libs-cu13` ship the same tree with different
   contents (pip lets the cu13 wheel overwrite); the base copy keeps only the files
   that differ
+- `humming-kernels` and `nvidia-deepstream-videodecode-cu13` go through the helper
+- `nvidia-cufile` is matched by name prefix, because the wheels come in cu12 and cu13
+  spellings, and gets rdma-core on the search path for `libcufile_rdma`
 - `vllm`'s vendored pynvml loads NVML by bare soname, which NixOS keeps out of the
   loader's search path. That failure hides well: the CUDA platform plugin swallows
   it, reports no platform, and the engine dies later with "Device string must not be
@@ -107,9 +122,9 @@ wheels that need more than that get their own entry:
   and `lib/stubs`, so any JIT-compiled op (vllm's sampler is one) failed to link
   with `cannot find -lcuda`
 
-### Project-side prerequisite
+### Shell prerequisite
 
-vllm JIT-compiles a few small kernels the first time it runs them, so the *shell*
+vllm JIT-compiles a few small kernels the first time it runs them, so the dev shell
 needs a compiler and a toolkit, not just the packages:
 
 ```nix
@@ -125,11 +140,20 @@ kernels, is possible but awkward here: which ops are needed depends on the model
 the attention backend, and the build sandbox has no GPU to detect an architecture
 from.
 
-### Worth knowing before adding vllm to an existing project
+### vllm and gptqmodel cannot share an environment
 
 vllm pins torch exactly and trails it by a couple of releases, while gptqmodel
 requires `protobuf>=7.34.0`; vllm 0.26+ depends on an `nvidia-cutlass-dsl` whose
-`libs-base` sidecar caps protobuf below 7. The two cannot coexist, so in one
-environment the newest usable combination is vllm 0.25.1 with torch 2.11. A project
-that wants newer vllm has to give up gptqmodel (vllm ships its own GPTQ/AWQ/Marlin
-kernels) or split it into its own environment.
+`libs-base` sidecar caps protobuf below 7. The two cannot coexist, so the newest
+usable combination alongside gptqmodel is vllm 0.25.1 with torch 2.11. Newer vllm
+means dropping gptqmodel (vllm ships its own GPTQ/AWQ/Marlin kernels) or giving it an
+environment of its own.
+
+Without gptqmodel there is no such constraint: vllm 0.29.0 with torch 2.13.0 builds
+and runs from this overlay set unchanged (verified on an RTX 4080 with Qwen3-4B-AWQ).
+Two notes:
+
+- Regenerate the lock instead of extending an old one. uv keeps locked versions, and
+  vllm pins `openai >= 2.0.0` with no upper bound; a stale `openai` pin is enough to
+  break vllm at import (`cannot import name 'NamespaceTool'`).
+- The shell prerequisite above still applies, for the same JIT reasons.

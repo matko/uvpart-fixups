@@ -35,7 +35,7 @@
       flake = {
         flakeModule = ./flake-module.nix;
         fixup-overlay = pkgs: pkgs.callPackage ./fixup-overlay.nix { };
-        # Opt-in: needs the extension list for the project that uses it.
+        # Opt-in: needs the extension list to be given when it is used.
         #   (inputs.uvpart-fixups.gptqmodel-ops {
         #     inherit pkgs;
         #     extensions = [ "marlin_fp16" "marlin_bf16" ];

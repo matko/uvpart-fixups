@@ -8,7 +8,7 @@
 #
 # Each extension is its own derivation, and the package only copies the results in.
 # Changing the selection therefore rebuilds the package and the extensions you
-# added, not the ones you already had; projects with overlapping selections share
+# added, not the ones you already had; locks with overlapping selections share
 # builds. Each ops derivation also loads its library back after installing it and
 # fails unless all of the operators it declares register.
 #
