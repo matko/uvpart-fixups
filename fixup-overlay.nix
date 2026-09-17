@@ -582,6 +582,8 @@ in
   # Sdists which run setup.py or a cffi build without declaring setuptools as a build
   # dependency, so their build environment has nothing to import. Matched by presence
   # rather than by a guard per package, since different locks carry different subsets.
+  # setuptools-rust is here for its own build, not for what it provides: it imports
+  # setuptools while declaring only the requirements of the crates it builds.
   map
     (name: {
       inherit name;
@@ -600,6 +602,7 @@ in
       "logbar"
       "tokenicer"
       "pluggy"
+      "setuptools-rust"
     ])
 )
 // lib.optionalAttrs (prev ? pypcre) {
