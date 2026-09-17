@@ -495,9 +495,14 @@ in
     })
     (builtins.filter (name: builtins.hasAttr name prev) [
       "defuser"
+      "pyyaml-ft"
+      "trove_classifiers"
+      "trove-classifiers"
+      "pyyaml_ft"
       "device-smi"
       "logbar"
       "tokenicer"
+      "pluggy"
     ])
 )
 // lib.optionalAttrs (prev ? pypcre) {
@@ -508,6 +513,46 @@ in
       pcre2
     ];
   });
+}
+// builtins.listToAttrs (
+  # Sdists built by flit_core which do not declare it, so uv reaches for a backend
+  # and finds nothing importable (uv2nix builds with --no-build-isolation). Unlike
+  # setuptools above, flit-core is not dragged into locks by anything else, so the
+  # project has to resolve it: add "flit-core" to its dependencies. That is a real
+  # runtime dependency rather than a build one, which is untidy, but
+  # [tool.uv.extra-build-dependencies] is not enough on its own - uv never writes
+  # those into uv.lock, so uv2nix sees no such package in the set.
+  map
+    (name: {
+      inherit name;
+      value = prev.${name}.overrideAttrs (p: {
+        nativeBuildInputs = (p.nativeBuildInputs or [ ]) ++ [ final."flit-core" ];
+      });
+    })
+    (builtins.filter (name: builtins.hasAttr name prev) [
+      "editables"
+      "pathspec"
+    ])
+)
+// builtins.listToAttrs (
+  # Sdists whose backend is poetry-core.masonry.api, which they also do not declare -
+  # the import failure names `poetry`, the parent package. Same presence-matching, and
+  # the same caveat as flit-core above: poetry-core is not pulled in by anything else,
+  # so the project has to resolve it into its own lock.
+  map
+    (name: {
+      inherit name;
+      value = prev.${name}.overrideAttrs (p: {
+        nativeBuildInputs = (p.nativeBuildInputs or [ ]) ++ [ final."poetry-core" ];
+      });
+    })
+    (builtins.filter (name: builtins.hasAttr name prev) [
+      "tomlkit"
+    ])
+)
+// lib.optionalAttrs (prev ? xformers) {
+  # Links torch's libraries and a CUDA runtime, like the other compiled wheels.
+  xformers = withCudaLibs "xformers" prev.xformers;
 }
 // lib.optionalAttrs (prev ? torchao) {
   torchao = withCudaLibs "torchao" prev.torchao;

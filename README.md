@@ -13,9 +13,45 @@ defined for packages the lock resolved.
 Some packages run `setup.py` or a cffi build without declaring setuptools as a build
 dependency, so their build environment has nothing to import. They are matched by
 presence rather than by a guard each, so a lock only needs to contain the ones it
-actually uses: `defuser`, `device-smi`, `logbar`, `tokenicer` (which get setuptools)
-and `pypcre` (which also builds against PCRE2). `torchao` links torch, so it goes
-through the same `withCudaLibs` helper as the CUDA wheels below.
+actually uses: `defuser`, `device-smi`, `logbar`, `tokenicer` (which get setuptools),
+`pluggy`, `pyyaml_ft`, `trove-classifiers` (and `trove_classifiers`; uv2nix exposes the
+PyPI spelling, so both are listed) and `pypcre` (which also builds against PCRE2).
+`torchao` links torch, so it goes through the same `withCudaLibs` helper as the CUDA
+wheels below.
+
+## sdists that forget flit_core
+
+The same failure with a flit backend instead of setuptools: `editables` and
+`pathspec` are built by `flit_core.buildapi` but declare it neither in their build
+requirements nor anywhere else, so uv2nix — which builds with `--no-build-isolation` — calls a
+backend it cannot import and dies with `ModuleNotFoundError: No module named
+'flit_core'`.
+
+There is one extra step here that the setuptools list above does not need. Those
+packages get `final.setuptools`, and setuptools is present in any lock because
+something always depends on it. **flit-core is not**, so there is no `final.flit-core`
+to attach unless the project resolves it first:
+
+```toml
+dependencies = [
+  # ...the framework...
+  # Build backend for the editables sdist. Add it here rather than under
+  # [tool.uv.extra-build-dependencies]: uv never writes those entries into uv.lock,
+  # and the overlay can only use packages the lock resolved.
+  "flit-core",
+]
+```
+
+With that entry present, the fixup is automatic — no `pythonOverlays` stanza of your
+own. Any project that hits this needs the same line; more package names can be added
+to the list as they turn up. `editables` and `pathspec` are there today.
+
+## sdists whose backend is poetry-core
+
+`tomlkit` builds through `poetry.core.masonry.api` and does not declare it; the import
+failure names `poetry`, the parent package. Same presence-matching, and the same
+requirement as flit-core above — poetry-core has to be resolved into the lock by the
+project, with a `"poetry-core"` dependency.
 
 ## gptqmodel kernels (opt-in)
 
@@ -102,7 +138,8 @@ unresolved, so the driver is preloaded at run time as everywhere else here. The
 wheels that need more than that get their own entry:
 
 - `torchvision`, `torchaudio`, `torch-c-dlpack-ext`, `xgrammar`, `flashinfer-python`,
-  `tilelang`, `tokenspeed-mla`, `tokenspeed-triton`, `pynvvideocodec`, `vllm`
+  `tilelang`, `tokenspeed-mla`, `tokenspeed-triton`, `pynvvideocodec`, `vllm`,
+  `xformers`
 - `torchcodec` also links ffmpeg and libheif, and ships one core/custom_ops module
   pair per ffmpeg major; only the pair matching the ffmpeg provided here is kept
 - `tilelang` bundles `libtvm.so`, which links Z3 under the versioned soname its build
