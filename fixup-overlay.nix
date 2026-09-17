@@ -9,6 +9,9 @@
   libfabric,
   pmix,
   mpi,
+  # flash-attn's build needs a real nvcc; see the entry at the bottom of this file.
+  ninja,
+  cudaPackages_13,
 }:
 final: prev: {
   nvidia-cuda-runtime-cu12 =
@@ -224,5 +227,37 @@ final: prev: {
   });
   pyvips = prev.pyvips.overrideAttrs (old: {
     nativeBuildInputs = (old.nativeBuildInputs or []) ++ [final.setuptools];
+  });
+}
+// lib.optionalAttrs (prev ? flash-attn) {
+  # flash-attn's legacy setup.py builds CUDA kernels against torch at build time.
+  # Its prebuilt-wheel download path cannot work in a sandbox and would otherwise
+  # silently produce a binary for a foreign toolchain, so it is forced off. setup.py
+  # only emits gencode for 80/90/100/120 -- there is no 89 -- and Ampere cubins run
+  # on Ada through CUDA's minor-version binary compatibility, so 80 is correct for
+  # an RTX 4080 and is the cheapest to build; widen FLASH_ATTN_CUDA_ARCHS (matching
+  # TORCH_CUDA_ARCH_LIST) for other GPUs.
+  #
+  # The Python build dependencies (torch, setuptools, wheel, packaging, psutil,
+  # ninja) are the consuming project's to declare, since setup.py has no
+  # pyproject.toml to declare them in:
+  #   [tool.uv.extra-build-dependencies]
+  #   "flash-attn" = ["torch", "setuptools", "wheel", "packaging", "psutil", "ninja"]
+  flash-attn = prev.flash-attn.overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or []) ++ [
+      ninja
+      cudaPackages_13.cudatoolkit
+    ];
+    # torch 2.14's headers require C++20 (std::strong_ordering in c10), but setup.py
+    # pins -std=c++17, which also stops torch from adding its own -std=c++20. If a
+    # future release drops the flag this becomes a no-op and torch supplies c++20.
+    postPatch = (old.postPatch or "") + ''
+      substituteInPlace setup.py --replace "-std=c++17" "-std=c++20"
+    '';
+    CUDA_HOME = "${cudaPackages_13.cudatoolkit}";
+    TORCH_CUDA_ARCH_LIST = "8.0";
+    FLASH_ATTENTION_FORCE_BUILD = "TRUE";
+    FLASH_ATTN_CUDA_ARCHS = "80";
+    NVCC_THREADS = "4";
   });
 }

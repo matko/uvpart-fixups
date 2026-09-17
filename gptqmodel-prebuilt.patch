@@ -1,0 +1,37 @@
+--- a/gptqmodel/utils/cpp.py
++++ b/gptqmodel/utils/cpp.py
+@@ -1274,13 +1274,28 @@
+                         candidates.append(match)
+         return candidates
+ 
++    def _packaged_prebuilt_library(self) -> Optional[Path]:
++        """Return the ops library shipped inside the package, when present.
++
++        Distribution builds that can run a CUDA toolchain may precompile an
++        extension and drop `<name>.so` into `gptqmodel_ext/prebuilt`, which then
++        needs neither nvcc nor a writable package directory at run time.
++        """
++
++        candidate = (
++            Path(__file__).resolve().parents[2]
++            / "gptqmodel_ext"
++            / "prebuilt"
++            / f"{self.name}.so"
++        )
++        return candidate if candidate.is_file() else None
++
+     def _configured_prebuilt_library(self) -> Optional[Path]:
+-        if not self.prebuilt_library_env:
+-            return None
+-        configured = os.getenv(self.prebuilt_library_env)
+-        if not configured:
+-            return None
+-        return Path(configured).expanduser().resolve(strict=False)
++        if self.prebuilt_library_env:
++            configured = os.getenv(self.prebuilt_library_env)
++            if configured:
++                return Path(configured).expanduser().resolve(strict=False)
++        return self._packaged_prebuilt_library()
+ 
+     def _load_configured_prebuilt_library(self, library_path: Path) -> bool:
+         """Load an explicitly configured library without evaluating JIT callbacks."""
