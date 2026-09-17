@@ -199,7 +199,7 @@ load_inline -> …/nix_jit_probe.so
 forty_two() -> 42
 ```
 
-## vllm (automatic, one shell prerequisite)
+## vllm (automatic)
 
 `vllm` drags in a large CUDA dependency tree, and most of the work is telling
 autoPatchelf where the sibling packages keep their libraries: torch's (under
@@ -231,11 +231,11 @@ wheels that need more than that get their own entry:
   and `lib/stubs`, so any JIT-compiled op (vllm's sampler is one) failed to link
   with `cannot find -lcuda`
 
-### Shell prerequisite
+### Shell entries (optional)
 
-vllm JIT-compiles a few small kernels the first time it runs them. It no longer needs
-a compiler and a toolkit on PATH for that — see "JIT at run time" above — so these
-entries are optional, for running nvcc or ninja by hand:
+vllm JIT-compiles a few small kernels the first time it runs them. Nothing has to be
+on PATH for that — see "JIT at run time" above — so no entry is required here; the
+example below is only for calling nvcc or ninja by hand:
 
 ```nix
 uvpart.extraPackages = [ pkgs.cudaPackages_13.cudatoolkit pkgs.ninja pkgs.gcc ];
@@ -265,5 +265,5 @@ Two notes:
 - Regenerate the lock instead of extending an old one. uv keeps locked versions, and
   vllm pins `openai >= 2.0.0` with no upper bound; a stale `openai` pin is enough to
   break vllm at import (`cannot import name 'NamespaceTool'`).
-- The shell prerequisite above is no longer needed, for the reasons in "JIT at run
-  time": nothing has to be on PATH but a `sh`, and a writable `~/.cache/flashinfer`.
+- No shell entries are needed, for the reasons in "JIT at run time": nothing has to be
+  on PATH but a `sh`, and a writable `~/.cache/flashinfer`.
