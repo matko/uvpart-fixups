@@ -9,8 +9,11 @@
   libfabric,
   pmix,
   mpi,
-  # flash-attn's build needs a real nvcc; see the entry at the bottom of this file.
+  # flash-attn's and llama-cpp-python's builds need a real nvcc; see the two
+  # guarded entries at the bottom of this file.
+  cmake,
   ninja,
+  patchelf,
   cudaPackages_13,
 }:
 final: prev: {
@@ -260,4 +263,55 @@ final: prev: {
     FLASH_ATTN_CUDA_ARCHS = "80";
     NVCC_THREADS = "4";
   });
+}
+// lib.optionalAttrs (prev ? llama-cpp-python) {
+  # llama-cpp-python compiles the llama.cpp it vendors, through scikit-build-core.
+  # ggml defaults GGML_CUDA to off, and CMake cannot detect an architecture when the
+  # build sandbox has no GPU, so both are pinned. GGML_NATIVE=OFF keeps -march=native
+  # out of the store, since the build host need not be the run host.
+  #
+  # scikit-build-core has to be resolvable in the *build* environment. It is the
+  # sdist's declared backend, but a lock which never resolved it does not contain it,
+  # so the consuming project declares it (see README.md):
+  #   [tool.uv.extra-build-dependencies]
+  #   "llama-cpp-python" = ["scikit-build-core"]
+  #
+  # CMAKE_CUDA_ARCHITECTURES is 89 (Ada); widen it for other GPUs.
+  llama-cpp-python =
+    let
+      cuda-loader-helper = callPackage ./cuda-loader-helper { };
+    in
+      prev.llama-cpp-python.overrideAttrs (old: {
+        nativeBuildInputs = (old.nativeBuildInputs or []) ++ [
+          cmake
+          ninja
+          patchelf
+          cudaPackages_13.cudatoolkit
+        ];
+        CMAKE_ARGS = lib.concatStringsSep " " [
+          "-DGGML_CUDA=on"
+          "-DGGML_NATIVE=OFF"
+          "-DCMAKE_CUDA_ARCHITECTURES=89"
+          "-DCUDAToolkit_ROOT=${cudaPackages_13.cudatoolkit}"
+          # ggml links libcuda only for its VMM API, and autoPatchelf resolves that
+          # from the toolkit's lib/stubs -- a stub then loads at run time, ggml's CUDA
+          # init fails with "CUDA driver is a stub library" and inference silently
+          # falls back to the CPU. Without VMM cudart is the only CUDA runtime
+          # dependency, which is the situation the loader helper below already
+          # handles for every other package here. Verify a real GPU load with
+          # llama_supports_gpu_offload().
+          "-DGGML_CUDA_NO_VMM=ON"
+        ];
+        preFixup =
+          (old.preFixup or "")
+          + ''
+            # Runs before autoPatchelf sets rpaths. The driver itself is not linked:
+            # the helper constructor preopens it (see cuda-loader-helper/), so the
+            # reference stays unresolved rather than pointing at the toolkit's stub.
+            for lib in $out/lib/python*/site-packages/llama_cpp/lib/*.so*; do
+              if [ -L "$lib" ]; then continue; fi
+              patchelf --add-needed ${cuda-loader-helper}/lib/cuda_loader_helper.so "$lib"
+            done
+          '';
+      });
 }

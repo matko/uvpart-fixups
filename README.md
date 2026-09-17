@@ -47,3 +47,36 @@ download cannot work in a sandbox), and pins `-std=c++20`, which torch 2.14's he
 require. Arch selection is a one-line change in `fixup-overlay.nix`
 (`FLASH_ATTN_CUDA_ARCHS` / `TORCH_CUDA_ARCH_LIST`), currently `80` — Ampere cubins
 run on Ada via CUDA's minor-version binary compatibility.
+
+## llama-cpp-python (automatic, one project-side prerequisite)
+
+`llama-cpp-python` compiles the llama.cpp it vendors, through `scikit-build-core`.
+That sdist *does* declare its backend, but a lock which never resolved it contains no
+such package, and uv2nix then builds the package in an environment without one — so
+the project declares it, exactly as for flash-attn:
+
+```toml
+[tool.uv.extra-build-dependencies]
+"llama-cpp-python" = ["scikit-build-core"]
+```
+
+The overlay adds `cmake`, `ninja` and the CUDA toolkit, and pins the ggml build:
+`GGML_CUDA=on` (ggml defaults to off), `CMAKE_CUDA_ARCHITECTURES=89` (Ada; there is no
+GPU in the sandbox for CMake to detect an architecture from), and `GGML_NATIVE=OFF` so
+`-march=native` does not leak into the store. Change the arch line for other GPUs.
+
+ggml links `libcuda` only for its VMM API, and autoPatchelf resolves that from the
+toolkit's `lib/stubs` — so the *stub* is what loads at run time, ggml's init fails with
+`CUDA driver is a stub library`, and inference quietly falls back to the CPU. The wheel
+still advertises a CUDA build, so nothing looks wrong until you notice the speed. The
+overlay therefore builds with `GGML_CUDA_NO_VMM=ON` and attaches `cuda-loader-helper`
+to the extension's libraries, which preopens the real driver. Both halves are
+load-bearing.
+
+`llama_supports_gpu_offload()` comes from the wheel itself, so it distinguishes a
+CUDA build from a CPU one:
+
+```console
+$ python -c "import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"
+True
+```
