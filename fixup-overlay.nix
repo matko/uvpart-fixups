@@ -111,12 +111,55 @@ in
           builtins.filter (name: cudaEnabled && lib.hasPrefix "nvidia-" name) (builtins.attrNames prev)
         );
         autoPatchelfIgnoreMissingDeps = [ "libcuda.so.1" ];
+        # JIT compilation at run time needs nvcc, ninja and a host compiler, and a dev
+        # shell cannot supply them to a deployed program: PATH and CUDA_HOME belong to
+        # the invocation, not to the artifact. Baking absolute store paths into torch's
+        # lookups makes the environment self-sufficient on its own -- and since a store
+        # path occurring in a file counts as a reference, the toolkit, ninja and the
+        # compiler land in this derivation's closure, so whatever deploys the
+        # environment deploys the tools with it.
+        #
+        # torch is the only place this has to happen for vllm, whose JIT compiles
+        # through cpp_extension; triton ships its own ptxas and needs only the driver,
+        # which is patched elsewhere. flashinfer and tilelang carry their own copies of
+        # the same lookups (see their entries below). nvcc itself needs no help finding
+        # gcc: nixpkgs points its compiler-bindir at the nixpkgs compiler at build time,
+        # so a .cu still compiles with PATH=/nonexistent.
+        #
+        # Every tool invocation in the file was enumerated rather than patched as found:
+        # the CUDA_HOME guess, the ninja command, the ninja availability probe and the
+        # host compiler. Everything else already uses an absolute path once CUDA_HOME is
+        # right (nvcc comes from $CUDA_HOME/bin).
+        #
+        # The environment variables are still consulted first, so CUDA_HOME and CXX can
+        # override deliberately. --replace-fail rather than --replace on purpose: these
+        # are upstream lines that move between releases, and a silent no-op would put
+        # the lookups quietly back on PATH.
         preFixup =
           (old.preFixup or "")
           + ''
           for dep in $cudaDependencies;do
             addAutoPatchelfSearchPath $(find $dep/lib/python*/site-packages -type d -name lib)
           done
+        ''
+          + ''
+          substituteInPlace $out/lib/python*/site-packages/torch/utils/cpp_extension.py \
+            --replace-fail "'/usr/local/cuda'" "'${cudaPackages_13.cudatoolkit}'" \
+            --replace-fail "['ninja', '-v']" "['${ninja}/bin/ninja', '-v']" \
+            --replace-fail "['ninja', '--version']" "['${ninja}/bin/ninja', '--version']" \
+            --replace-fail "os.environ.get('CXX', 'c++')" "os.environ.get('CXX', '${stdenv.cc}/bin/c++')"
+          # Inductor has its own compiler picker, whose last resort is the bare name
+          # "nvcc" -- another silent return to PATH.
+          substituteInPlace $out/lib/python*/site-packages/torch/_inductor/codegen/cuda/compile_utils.py \
+            --replace-fail '    return "nvcc"' '    return "${cudaPackages_13.cudatoolkit}/bin/nvcc"'
+          # GCC 15 rejects this line of torch 2.11's headers in nvcc's host pass
+          # ([-Wtemplate-body]: a "need typename" error on a typename that is already
+          # written), which fails every CUDA JIT compile. Plain g++ accepts it, so it
+          # only bites through nvcc, and neither -fpermissive nor
+          # -Wno-error=template-body helps. A vector's difference_type is ptrdiff_t, so
+          # the cast keeps its meaning; drop this line when torch ships the fix.
+          substituteInPlace $out/lib/python*/site-packages/torch/include/ATen/core/List_inl.h \
+            --replace-fail 'static_cast<typename decltype(impl_->list)::difference_type>(pos)' 'static_cast<std::ptrdiff_t>(pos)'
         '';
       }
   );
@@ -468,13 +511,23 @@ in
   # links them with -L$CUDA_HOME/lib64 and -L$CUDA_HOME/lib64/stubs -- the NVIDIA
   # toolkit layout. nixpkgs ships the same libraries as lib/ and lib/stubs, so the
   # link dies with "cannot find -lcuda" and the engine never finishes starting.
+  #
+  # It also carries its own copy of the lookups torch's entry above patches: its own
+  # CUDA_HOME detection, its own cxx, its own ninja invocation. Same reasoning, so the
+  # same absolute paths. get_cuda_path() is short-circuited at the environment lookup
+  # rather than merely given a different default, because the "which nvcc" fallback
+  # runs through subprocess and would raise FileNotFoundError on a PATH without the
+  # which utility before ever reaching the default.
   flashinfer-python = (withCudaLibs "flashinfer-python" prev.flashinfer-python).overrideAttrs (old: {
     preFixup =
       (old.preFixup or "")
       + ''
         substituteInPlace $out/lib/python*/site-packages/flashinfer/jit/cpp_ext.py \
           --replace-fail '"-L$cuda_home/lib64",' '"-L$cuda_home/lib",' \
-          --replace-fail '"-L$cuda_home/lib64/stubs",' '"-L$cuda_home/lib/stubs",'
+          --replace-fail '"-L$cuda_home/lib64/stubs",' '"-L$cuda_home/lib/stubs",' \
+          --replace-fail 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")' 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "${cudaPackages_13.cudatoolkit}"' \
+          --replace-fail 'os.environ.get("CXX", "c++")' 'os.environ.get("CXX", "${stdenv.cc}/bin/c++")' \
+          --replace-fail '"ninja",' '"${ninja}/bin/ninja",'
       '';
   });
 }
@@ -495,6 +548,12 @@ in
       ''
       + ''
         addAutoPatchelfSearchPath ${z3}/lib
+        # tilelang carries its own CUDA_HOME detection (tilelang/env.py) and, without a
+        # PATH, would land on the PyPI nvidia-cuda-nvcc wheel: that nvcc has no
+        # compiler-bindir, so it cannot find a host compiler either. Same reasoning as
+        # torch and flashinfer above.
+        substituteInPlace $out/lib/python*/site-packages/tilelang/env.py \
+          --replace-fail 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")' 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "${cudaPackages_13.cudatoolkit}"'
       '';
   });
 }

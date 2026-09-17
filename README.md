@@ -144,6 +144,61 @@ $ python -c "import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"
 True
 ```
 
+## JIT at run time: the toolchain is baked in, not put on PATH
+
+A dev shell can hand nvcc, ninja and a host compiler to a JIT by putting them on
+PATH, but a deployed program gets neither that PATH nor CUDA_HOME: environment
+variables belong to the invocation, not to the artifact. The packages that compile at
+run time therefore carry the tools inside their own lookups, as absolute store paths:
+
+| package | lookups repointed |
+| --- | --- |
+| `torch` | the `/usr/local/cuda` fallback in `_find_cuda_home`, the ninja command, the ninja availability probe, `get_cxx_compiler`, and inductor's `_cuda_compiler`, whose last resort was the bare name `nvcc` |
+| `flashinfer-python` | its own copy in `flashinfer/jit/cpp_ext.py`: `get_cuda_path`, `cxx`, and its ninja invocation |
+| `tilelang` | the CUDA_HOME detection in `tilelang/env.py`, which otherwise lands on the PyPI `nvidia-cuda-nvcc` wheel |
+
+`vllm` needs no entry of its own, its JIT compiling through cpp_extension, and `triton`
+needs none either: it ships its own ptxas and only wants the driver, which the
+preloader already handles. Every environment variable is still read first, so
+CUDA_HOME and CXX still override deliberately.
+
+Because a store path occurring in a file counts as a reference, the toolkit, ninja and
+the compiler enter those derivations' closures, so whatever deploys the environment
+deploys the tools with it:
+
+```console
+$ nix-store -q --references /nix/store/…-torch-2.11.0 | grep -E 'cuda-merged|ninja|gcc-wrapper'
+/nix/store/893x2zqx2kjd3rypfr2pb890cngz7l1j-cuda-merged-13.3
+/nix/store/r8a159fqvj0mpczq0dq8d3dwdd2rsz8c-ninja-1.13.2
+/nix/store/z4c6k0mrlkwl3s4w9ysxc8vq1wylm3ms-gcc-wrapper-15.3.0
+```
+
+One entry is not a lookup. GCC 15 rejects a line of torch 2.11's
+`ATen/core/List_inl.h` inside nvcc's host pass — `[-Wtemplate-body]`, a "need
+`typename`" error on a `typename` that is already written — which fails every CUDA JIT
+compile; plain `g++` accepts the same line, and neither `-fpermissive` nor
+`-Wno-error=template-body` helps. The equivalent `std::ptrdiff_t` cast is substituted
+instead.
+
+Two requirements remain, neither of them a toolchain one. ninja runs its build
+commands through a shell, so some `sh` has to be on PATH — `/bin` is enough. And the
+JIT writes into `~/.cache/torch_extensions` or `FLASHINFER_JIT_DIR`, so that directory
+has to be writable.
+
+Verified by compiling and loading a CUDA extension with the environment alone,
+`PATH=/bin`, and CUDA_HOME, CXX and CC unset:
+
+```console
+$ env -i PATH=/bin CUDA_HOME= CXX= CC= …-editable-env/bin/python -c '…load_inline(…)'
+cpp_extension._find_cuda_home() -> /nix/store/…-cuda-merged-13.3
+cpp_extension.get_cxx_compiler() -> /nix/store/…-gcc-wrapper-15.3.0/bin/c++
+flashinfer get_cuda_path() -> /nix/store/…-cuda-merged-13.3
+inductor _cuda_compiler() -> /nix/store/…-cuda-merged-13.3/bin/nvcc
+tilelang CUDA_HOME -> /nix/store/…-cuda-merged-13.3
+load_inline -> …/nix_jit_probe.so
+forty_two() -> 42
+```
+
 ## vllm (automatic, one shell prerequisite)
 
 `vllm` drags in a large CUDA dependency tree, and most of the work is telling
@@ -178,16 +233,16 @@ wheels that need more than that get their own entry:
 
 ### Shell prerequisite
 
-vllm JIT-compiles a few small kernels the first time it runs them, so the dev shell
-needs a compiler and a toolkit, not just the packages:
+vllm JIT-compiles a few small kernels the first time it runs them. It no longer needs
+a compiler and a toolkit on PATH for that — see "JIT at run time" above — so these
+entries are optional, for running nvcc or ninja by hand:
 
 ```nix
 uvpart.extraPackages = [ pkgs.cudaPackages_13.cudatoolkit pkgs.ninja pkgs.gcc ];
 ```
 
-Without it the engine dies with `Could not find nvcc and default
-cuda_home='/usr/local/cuda' doesn't exist`. The first generation pays a one-off
-compile into `~/.cache/flashinfer`, after which the result is reused.
+The first generation pays a one-off compile into `~/.cache/flashinfer`, after which
+the result is reused.
 
 Precompiling those kernels at build time, the way `gptqmodel-ops` does for the marlin
 kernels, is possible but awkward here: which ops are needed depends on the model and
@@ -210,4 +265,5 @@ Two notes:
 - Regenerate the lock instead of extending an old one. uv keeps locked versions, and
   vllm pins `openai >= 2.0.0` with no upper bound; a stale `openai` pin is enough to
   break vllm at import (`cannot import name 'NamespaceTool'`).
-- The shell prerequisite above still applies, for the same JIT reasons.
+- The shell prerequisite above is no longer needed, for the reasons in "JIT at run
+  time": nothing has to be on PATH but a `sh`, and a writable `~/.cache/flashinfer`.
