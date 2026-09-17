@@ -88,6 +88,18 @@ and `setup.py` fails on `import setuptools`:
 "flash-attn" = ["torch", "setuptools", "wheel", "packaging", "psutil", "ninja"]
 ```
 
+The names in that stanza are resolved against the environment's *build-host* python
+package set — the `pyproject-build-systems` input — and not against your lock. That is
+why `wheel`, `ninja`, `packaging`, `psutil` and `torch` are available to it without
+any of them being locked: this is uv2nix's `resolveBuildSystem`, picked up
+automatically from `[tool.uv.extra-build-dependencies]`.
+
+The overlay's own idiom is a different source: `nativeBuildInputs ++ [ final.setuptools ]`
+takes `setuptools` from *your lock*, which is why the flit-core and poetry-core
+sections above have to ask you to put those in `dependencies` first. Both are right for
+what they do — a package needs the stanza when what its build imports is not in your
+lock, and the fixup when what it forgot to declare is.
+
 The overlay then supplies the toolkit, forces a source build (its prebuilt-wheel
 download cannot work in a sandbox), and pins `-std=c++20`, which torch 2.14's headers
 require. Arch selection is a one-line change in `fixup-overlay.nix`
