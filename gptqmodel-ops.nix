@@ -64,10 +64,14 @@
   # build-ops.py enforces the pairing.
   cudaToolkit ? pkgs.cudaPackages_13.cudatoolkit,
   # Target GPU architectures; "+PTX" keeps the libraries usable on newer cards.
-  # "8.9+PTX" is Ada, "8.0;8.6;8.9;9.0+PTX" covers Ampere up, at ~4x the build time.
-  cudaArch ? "8.9+PTX",
+  # null keeps this helper on its own default of Ada alone; the list comes from
+  # uvpart.cudaArch, and "+PTX" lands on the last entry.
+  cudaArch ? null,
 }:
 let
+  # Rendering for the capability list uvpart.cudaArch supplies; null keeps the default.
+  cudaArchRender = import ./cuda-arch.nix { lib = pkgs.lib; };
+
   # "none" is the explicit opt-out: the loader hook is still patched in (it simply
   # finds no library, matching upstream behaviour), but nothing is compiled, so no
   # CUDA toolkit, compiler or unfree package is pulled in.
@@ -135,7 +139,7 @@ else
         ];
         CUDA_HOME = "${cudaToolkit}";
         TORCH_PREFIX = "${final.torch}";
-        TORCH_CUDA_ARCH_LIST = cudaArch;
+        TORCH_CUDA_ARCH_LIST = if cudaArch == null then "8.9+PTX" else cudaArchRender.toTorchCudaArchList cudaArch;
         dontConfigure = true;
         dontBuild = true;
         installPhase = ''

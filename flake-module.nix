@@ -10,10 +10,16 @@
       # presence test in fixup-overlay.nix; true forces it; false suppresses it. The choice
       # travels as an attribute rather than a package, so it costs nothing and stays
       # invisible to Python.
+      #
+      # uvpart.cudaArch travels the same way. It is a list of compute capabilities, and
+      # the entries in fixup-overlay.nix that compile kernels read it from there, so a
+      # project can move its whole kernel set to another GPU generation with one setting.
+      # null leaves every package on its own default.
       config.uvpart.pythonOverlays = [
         fixup-overlay
         (final: prev: {
           __uvpart-cuda-jit-toolchain = config.uvpart.cudaJitToolchain;
+          __uvpart-cuda-arch = config.uvpart.cudaArch;
         })
       ];
     };

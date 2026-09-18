@@ -23,6 +23,24 @@
 }:
 final: prev:
 let
+  # The architectures that a few entries below compile for, when the project sets
+  # uvpart.cudaArch. Null leaves each of them on the default it used to hardcode.
+  cudaArchCaps = final.__uvpart-cuda-arch or null;
+  cudaArchCapsOrEmpty = if cudaArchCaps == null then [ ] else cudaArchCaps;
+  cudaArch = import ./cuda-arch.nix { inherit lib; };
+
+  # flash-attn's setup.py emits gencode for 80/90/100/120 and has no other mapping, so a
+  # requested capability is snapped to the closest of those it can build. On Ada that is
+  # 8.0/80, which runs there by minor-version binary compatibility. Anything from a major
+  # it has no entry for leaves the entry's own default standing.
+  flashAttnSupported = [
+    "8.0"
+    "9.0"
+    "10.0"
+    "12.0"
+  ];
+  flashAttnCaps = cudaArch.snapToSupported flashAttnSupported [ "8.0" ] cudaArchCapsOrEmpty;
+
   # Wheels with compiled CUDA extensions keep much of what they link in sibling
   # packages: torch's libraries (site-packages/torch/lib), the CUDA runtime libraries
   # inside the nvidia-* wheels (nvidia/<component>/lib) and, in a few cases, the TVM
@@ -376,7 +394,7 @@ in
   # silently produce a binary for a foreign toolchain, so it is forced off. setup.py
   # only emits gencode for 80/90/100/120 -- there is no 89 -- and Ampere cubins run
   # on Ada through CUDA's minor-version binary compatibility, so 80 is correct for
-  # an RTX 4080 and is the cheapest to build; widen FLASH_ATTN_CUDA_ARCHS (matching
+  # an RTX 4080 and is the cheapest to build; set uvpart.cudaArch rather than widening FLASH_ATTN_CUDA_ARCHS (matching
   # TORCH_CUDA_ARCH_LIST) for other GPUs.
   #
   # The Python build dependencies (torch, setuptools, wheel, packaging, psutil,
@@ -396,9 +414,9 @@ in
       substituteInPlace setup.py --replace "-std=c++17" "-std=c++20"
     '';
     CUDA_HOME = "${cudaPackages_13.cudatoolkit}";
-    TORCH_CUDA_ARCH_LIST = "8.0";
+    TORCH_CUDA_ARCH_LIST = if cudaArchCaps == null then "8.0" else cudaArch.toTorchCudaArchList flashAttnCaps;
     FLASH_ATTENTION_FORCE_BUILD = "TRUE";
-    FLASH_ATTN_CUDA_ARCHS = "80";
+    FLASH_ATTN_CUDA_ARCHS = if cudaArchCaps == null then "80" else cudaArch.toJoinedArchNumbers flashAttnCaps;
     NVCC_THREADS = "4";
   });
 }
@@ -407,7 +425,7 @@ in
   # setup.py wants a CUDA toolchain in the build sandbox. CUDA_HOME and the arch
   # follow the flash-attn entry above: setup.py emits gencode from
   # TORCH_CUDA_ARCH_LIST, and 8.0 cubins run on Ada through CUDA's minor-version
-  # binary compatibility, so those and NVCC_THREADS are the lines to widen for other
+  # binary compatibility, so these and NVCC_THREADS are the lines uvpart.cudaArch replaces
   # GPUs.
   #
   # The Python build dependencies (torch, setuptools, wheel, packaging, ninja) have
@@ -419,7 +437,7 @@ in
       cudaPackages_13.cudatoolkit
     ];
     CUDA_HOME = "${cudaPackages_13.cudatoolkit}";
-    TORCH_CUDA_ARCH_LIST = "8.0";
+    TORCH_CUDA_ARCH_LIST = if cudaArchCaps == null then "8.0" else cudaArch.toTorchCudaArchList cudaArchCaps;
     NVCC_THREADS = "4";
     # Otherwise setup.py tries to fetch a prebuilt wheel from GitHub, which cannot
     # work in the sandbox. PyPI's torch is cxx11-ABI.
@@ -439,7 +457,7 @@ in
   #   [tool.uv.extra-build-dependencies]
   #   "llama-cpp-python" = ["scikit-build-core"]
   #
-  # CMAKE_CUDA_ARCHITECTURES is 89 (Ada); widen it for other GPUs.
+  # CMAKE_CUDA_ARCHITECTURES is 89 (Ada); uvpart.cudaArch replaces it.
   llama-cpp-python =
     let
       cuda-loader-helper = callPackage ./cuda-loader-helper { };
@@ -454,7 +472,7 @@ in
         CMAKE_ARGS = lib.concatStringsSep " " [
           "-DGGML_CUDA=on"
           "-DGGML_NATIVE=OFF"
-          "-DCMAKE_CUDA_ARCHITECTURES=89"
+          "-DCMAKE_CUDA_ARCHITECTURES=${if cudaArchCaps == null then "89" else cudaArch.toJoinedArchNumbers cudaArchCaps}"
           "-DCUDAToolkit_ROOT=${cudaPackages_13.cudatoolkit}"
           # ggml links libcuda only for its VMM API, and autoPatchelf resolves that
           # from the toolkit's lib/stubs -- a stub then loads at run time, ggml's CUDA
