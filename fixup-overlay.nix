@@ -84,6 +84,22 @@ let
             done
           '';
       });
+  # deep_ep and deep_gemm compile their kernels through a CUDA_HOME they resolve for
+  # themselves and assert on at import time, so they need the rewrite the entries below
+  # make inside the packages that JIT-compile. Their finder reads CUDA_HOME, then
+  # CUDA_PATH, then `which nvcc`, then /usr/local/cuda -- which does not exist here, so
+  # it returns None and the assert fires before any hardware is touched. Spelled with
+  # single quotes because that is how those two files write it, so --replace-fail
+  # matches.
+  withCudaHome = file: pkg:
+    pkg.overrideAttrs (old: {
+      preFixup =
+        (old.preFixup or "")
+        + lib.optionalString cudaJitEnabled ''
+          substituteInPlace $out/lib/python*/site-packages/${file} \
+            --replace-fail "os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')" "os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH') or '${cudaJit}'"
+        '';
+    });
   # The runtime JIT toolchain. Only a project that compiles CUDA C++ at run time wants
   # it: vllm's cpp_extension ops, flashinfer's kernels, tilelang's DSL, inductor's nvcc
   # path. Triton-based kernels need ptxas and the driver instead, which the triton wheel
@@ -140,6 +156,16 @@ let
       # without it compiles the host pass and then dies in nvcc's include of the runtime
       # header. cuda_cccl needs no merging, since nvcc's own profile reaches it.
       cudaPackages_13.cuda_crt
+      # A CUDA library package keeps its headers in a separate `include` output that
+      # nothing pulls in implicitly, so the merge above carried cuda_runtime.h and the
+      # CCCL headers and nothing else. vllm's flashinfer sampler JIT includes <curand.h>
+      # and dies with "fatal error: curand.h: No such file or directory" for exactly that
+      # reason; cusparse.h is the other header a JIT path reaches for. Both outputs are
+      # merged, which is also what makes the tree look like the CUDA install every JIT
+      # path assumes. It is a `include` output rather than the package's `dev` one:
+      # checked, not assumed.
+      cudaPackages_13.libcurand.include
+      cudaPackages_13.libcusparse.include
     ];
   };
 in
@@ -576,13 +602,25 @@ in
   # The CUDA_HOME those flags are relative to is a JIT concern and is patched below,
   # gated on the CUDA components being present; this entry stays because it is about
   # linking flags, not lookups.
+  #
+  # Those flags also have to ask for lazy binding. Nix's linker wrapper puts hardening's
+  # `-z now` before the caller's arguments, and `-z now` is fatal to exactly the modules
+  # a JIT links: flashinfer leaves its CTA_TILE_Q=32 prefill dispatch arm undefined on
+  # purpose -- `nm -D --undefined-only` on the built module lists
+  # flashinfer::BatchPrefillWithRaggedKVCacheDispatched<32u, 256u, 256u, ...> -- and
+  # binds it through the PLT at first use, which eager resolution at dlopen cannot do.
+  # `readelf -d` on that module shows BIND_NOW and FLAGS_1: NOW, and the import fails
+  # with "undefined symbol" instead. Because the caller's flags come after the wrapper's,
+  # `-Wl,-z,lazy` here wins, and it is a property of the compiled module rather than of
+  # whoever links it.
   flashinfer-python = (withCudaLibs "flashinfer-python" prev.flashinfer-python).overrideAttrs (old: {
     preFixup =
       (old.preFixup or "")
       + ''
         substituteInPlace $out/lib/python*/site-packages/flashinfer/jit/cpp_ext.py \
           --replace-fail '"-L$cuda_home/lib64",' '"-L$cuda_home/lib",' \
-          --replace-fail '"-L$cuda_home/lib64/stubs",' '"-L$cuda_home/lib/stubs",'
+          --replace-fail '"-L$cuda_home/lib64/stubs",' '"-L$cuda_home/lib/stubs",' \
+          --replace-fail '"-lcuda",' '"-lcuda", "-Wl,-z,lazy",'
       ''
       + lib.optionalString cudaJitEnabled ''
         substituteInPlace $out/lib/python*/site-packages/flashinfer/jit/cpp_ext.py \
@@ -591,6 +629,78 @@ in
           --replace-fail '"ninja",' '"${ninja}/bin/ninja",'
       '';
   });
+}
+// lib.optionalAttrs (prev ? sglang) {
+  # sglang's CUDA wheel ships a compiled memory-cache extension that links torch's
+  # libraries, so it gets the same sibling search paths as the other compiled wheels
+  # here. What it compiles at run time is sglang.kernels.jit -- its sampler and its
+  # attention backends -- which writes its own build.ninja instead of going through
+  # tvm-ffi's load_inline, and that makes kernels/jit/utils/compile/toolchain.py the
+  # only place the flags tvm-ffi used to supply can come from. That file resolves CUDA
+  # for itself, and four things there keep the build from working once the environment
+  # carries no CUDA_HOME:
+  #
+  #  * cuda_home() reads CUDA_HOME/CUDA_PATH, then `which nvcc`, then /usr/local/cuda,
+  #    which does not exist here: nvcc resolves to /usr/local/cuda/bin/nvcc and the
+  #    compile dies with exit code 127. The same rewrite flashinfer's and tilelang's
+  #    entries make, because it is also the compiler path, the cache key and the root
+  #    every flag below is relative to.
+  #  * base_link_flags() appends -L$CUDA_HOME/lib64, the NVIDIA toolkit layout, while
+  #    this toolkit ships cudart as lib/: the link dies with "cannot find -lcudart".
+  #  * base_include_paths() lists tvm-ffi's headers and, under ROCm, rocm_home()'s
+  #    include, but nothing for CUDA, so nvcc cannot find cuda_runtime.h even with
+  #    cuda_home() right -- the `-isystem $CUDA_HOME/include` the other JIT packages
+  #    get is part of tvm-ffi's load_inline, which this module bypasses. The ROCm
+  #    branch is the shape the CUDA one is missing.
+  #  * the compiler and the build driver are bare names too -- `os.environ.get("CXX",
+  #    "c++")` in toolchain.py and ["ninja", "-f", _BUILD_FILE] in the ninja.py beside
+  #    it -- so a program that inherits the artifact but not a dev shell's PATH dies at
+  #    the first build. The same two rewrites torch's and flashinfer's entries make.
+  #
+  # The link flags also ask for lazy binding, for the failure the flashinfer-python
+  # entry above explains: Nix's linker wrapper puts `-z now` before the caller's
+  # arguments, and the modules this JIT builds are exactly the ones that cannot be
+  # resolved eagerly. The flag is last in the list it is added to, so it wins.
+  sglang = (withCudaLibs "sglang" prev.sglang).overrideAttrs (old: {
+    preFixup =
+      (old.preFixup or "")
+      + ''
+        substituteInPlace $out/lib/python*/site-packages/sglang/kernels/jit/utils/compile/toolchain.py \
+          --replace-fail 'f"-L{cuda_home()}/lib64"' 'f"-L{cuda_home()}/lib"' \
+          --replace-fail 'return list(includes)' 'return [*includes, f"{cuda_home()}/include"]' \
+          --replace-fail '"-shared", f"-L{lib_dir}", f"-l{lib_name}"' '"-shared", f"-L{lib_dir}", f"-l{lib_name}", "-Wl,-z,lazy"'
+      ''
+      + lib.optionalString cudaJitEnabled ''
+        substituteInPlace $out/lib/python*/site-packages/sglang/kernels/jit/utils/compile/toolchain.py \
+          --replace-fail 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")' 'os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "${cudaJit}"' \
+          --replace-fail 'os.environ.get("CXX", "c++")' 'os.environ.get("CXX", "${stdenv.cc}/bin/c++")'
+        substituteInPlace $out/lib/python*/site-packages/sglang/kernels/jit/utils/compile/ninja.py \
+          --replace-fail '["ninja", "-f", _BUILD_FILE]' '["${ninja}/bin/ninja", "-f", _BUILD_FILE]'
+      '';
+  });
+}
+// lib.optionalAttrs (prev ? sglang-kernel) {
+  # sglang's prebuilt CUDA kernels, which link the CUDA runtime, NVRTC and cuBLAS from
+  # the nvidia-* wheels, like the other compiled wheels here.
+  sglang-kernel = withCudaLibs "sglang-kernel" prev.sglang-kernel;
+}
+// lib.optionalAttrs (prev ? sgl-deep-ep) {
+  # DeepEP: torch's libraries, the CUDA runtime, NCCL and NVSHMEM, plus the CUDA_HOME
+  # rewrite above -- sglang imports deep_ep eagerly from its scheduler path, so the
+  # assert runs before any hardware is touched.
+  sgl-deep-ep = withCudaHome "deep_ep/__init__.py" (withCudaLibs "sgl-deep-ep" prev.sgl-deep-ep);
+}
+// lib.optionalAttrs (prev ? sgl-deep-gemm) {
+  # DeepGEMM: torch's libraries, the CUDA runtime, NVRTC, cuBLAS and the TVM FFI
+  # library that apache-tvm-ffi installs outside site-packages, plus the same CUDA_HOME
+  # lookup.
+  sgl-deep-gemm = withCudaHome "deep_gemm/cuda_helpers.py" (withCudaLibs "sgl-deep-gemm" prev.sgl-deep-gemm);
+}
+// lib.optionalAttrs (prev ? torch-memory-saver) {
+  # Ships its hooks built for both CUDA majors and autoPatchelf patches all of them, so
+  # both runtimes have to be on the search path even though a cu13 torch only ever
+  # loads the cu13 one.
+  torch-memory-saver = withCudaLibs "torch-memory-saver" prev.torch-memory-saver;
 }
 // lib.optionalAttrs (prev ? xgrammar) {
   xgrammar = withCudaLibs "xgrammar" prev.xgrammar;

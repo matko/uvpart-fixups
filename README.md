@@ -159,10 +159,11 @@ True
 ## JIT at run time (when the lock carries a CUDA toolkit)
 
 Some packages compile CUDA C++ on first use instead of linking a prebuilt kernel:
-vllm's sampler and its other `cpp_extension` ops, flashinfer's JIT kernels, tilelang's
-DSL, and inductor's nvcc path. Triton-based kernels do not — unsloth, liger-kernel,
-flash-linear-attention and plain triton compile through `ptxas`, which the triton wheel
-ships, and need only the driver, which the preloader provides.
+vllm's sampler and its other `cpp_extension` ops, flashinfer's JIT kernels, sglang's
+own sampler and attention backends, tilelang's DSL, and inductor's nvcc path.
+Triton-based kernels do not — unsloth, liger-kernel, flash-linear-attention and plain
+triton compile through `ptxas`, which the triton wheel ships, and need only the driver,
+which the preloader provides.
 
 There is nothing to opt into. The toolchain is applied whenever the environment carries
 the CUDA components, so a project that compiles CUDA C++ at run time gets it by depending
@@ -179,26 +180,51 @@ packages' own lookups as absolute store paths:
 | --- | --- |
 | `torch` | the `/usr/local/cuda` fallback in `_find_cuda_home`, the ninja command, the ninja availability probe, `get_cxx_compiler`, and inductor's `_cuda_compiler`, whose last resort was the bare name `nvcc` |
 | `flashinfer-python` | its own copy in `flashinfer/jit/cpp_ext.py`: `get_cuda_path`, `cxx`, and its ninja invocation |
+| `sglang` | its own JIT in `sglang/kernels/jit/utils/compile/`: `cuda_home`, `cxx`, the ninja invocation, and the CUDA include path and `lib/` link flag that nothing else supplies to that module |
 | `tilelang` | the CUDA_HOME detection in `tilelang/env.py`, which otherwise lands on the PyPI `nvidia-cuda-nvcc` wheel |
+
+`sglang` is the odd one here: its JIT writes its own `build.ninja` instead of going
+through `cpp_extension`, so none of the flags tvm-ffi would have supplied reach the
+compiler unless `kernels/jit/utils/compile/toolchain.py` states them — which is why that
+file also needs the CUDA include directory, its link flag moved off the NVIDIA `lib64`
+layout, and the `ninja`/`CXX` names made absolute. Without them a program that inherits
+the artifact but not a dev shell's PATH fails at the first build, which is the failure
+this section is about.
+
+Those entries also ask their linker for `-Wl,-z,lazy`, which is a hardening flag being
+relaxed on purpose. The linker Nix wraps every JIT build with puts hardening's `-z now`
+before the caller's arguments, and `-z now` marks the module `DF_1_NOW`: every PLT entry
+resolved at load, which is what a JIT module cannot survive. flashinfer leaves its
+`CTA_TILE_Q=32` prefill dispatch arm undefined deliberately — `nm -D --undefined-only` on
+the built module lists `BatchPrefillWithRaggedKVCacheDispatched<32u, 256u, 256u, …>` — and
+binds it through the PLT at first use, so `readelf -d` showing `BIND_NOW` and
+`FLAGS_1: NOW` means the import dies with "undefined symbol". The flag the module asks for
+comes last on its own command line, so it wins over the wrapper's.
 
 `vllm` needs no entry of its own, its JIT compiling through cpp_extension, and `triton`
 needs none either: it ships its own ptxas and only wants the driver, which the
 preloader already handles. Every environment variable is still read first, so
 CUDA_HOME and CXX still override deliberately.
 
-The tree is a merge of `cuda_nvcc`, `cuda_cudart` and `cuda_crt`, about 683 MiB together,
-rather than `cudaPackages_13.cudatoolkit` at about 2.6 GiB. The merged toolkit's `bin/nvcc`
+The tree is a merge of `cuda_nvcc`, `cuda_cudart`, `cuda_crt` and the `include` outputs
+of `libcurand` and `libcusparse`, about 683 MiB together, rather than
+`cudaPackages_13.cudatoolkit` at about 2.6 GiB. The merged toolkit's `bin/nvcc`
 is a symlink to `cuda_nvcc`'s, so the compiler is the same one, `cuda_cudart` brings
 `include/cuda_runtime.h` and `cuda_crt` the `crt/` headers it includes. What the merged
 toolkit adds is cublas, cufft, nvrtc and friends, which nothing here links, because torch
-takes its runtime libraries from the `nvidia-*` wheels.
+takes its runtime libraries from the `nvidia-*` wheels. Those two `include` outputs are
+merged because a CUDA library package keeps its headers in one of its own — named
+`include`, not `dev` — and nothing depends on it implicitly: without them the tree had
+`cuda_runtime.h` and the CCCL headers and no `<curand.h>`, so vllm's flashinfer sampler
+JIT died on `fatal error: curand.h: No such file or directory`.
 
 The merge is plain: no copied binary, no rewritten profile. A compiler here needs nothing
 rewritten, because it keeps its own installation-relative lookups and the tree's `include/`
 reaches it through the `-isystem $CUDA_HOME/include` that the callers pass — torch,
-flashinfer and tilelang all do, and that is what makes the merge sufficient. A bare `nvcc`
-from this tree does *not* find `cuda_runtime.h`, since its own profile points at the
-`cuda_nvcc` package's include; the callers are the interface.
+flashinfer and tilelang do that themselves, sglang's own JIT gets it from
+`base_include_paths`, and that is what makes the merge sufficient. A bare `nvcc` from this
+tree does *not* find `cuda_runtime.h`, since its own profile points at the `cuda_nvcc`
+package's include; the callers are the interface.
 
 Building the tree from the CUDA wheels instead was tried, and it does not work — worth
 recording, because it looks like it should. The wheels do ship a whole compiler
@@ -277,6 +303,21 @@ load_inline -> …/nix_jit_probe.so
 forty_two() -> 42
 ```
 
+The lookups themselves can be checked without a GPU, from the same environment. The probe
+loads sglang's and flashinfer's modules out of `site-packages` with the imports they make
+stubbed, then asks them where CUDA is, what they include and what they link — which is
+also what makes it fail on an unpatched tree rather than pass quietly:
+
+```console
+$ env -i PATH=/bin …-editable-env/bin/python tests/jit-toolchain-probe.py
+sglang    cuda_home()          -> /nix/store/…-cuda-jit
+sglang    host_compiler_path   -> /nix/store/…-gcc-wrapper-15.3.0/bin/c++
+sglang    base_include_paths   -> ['…', '/nix/store/…-cuda-jit/include']
+sglang    base_link_flags      -> ['-shared', '…', '-Wl,-z,lazy', '-L/nix/store/…-cuda-jit/lib', '-lcudart']
+flashinfer ldflags = -shared -L$cuda_home/lib -L$cuda_home/lib/stubs -lcudart -lcuda -Wl,-z,lazy
+all checks passed
+```
+
 ## vllm (automatic)
 
 `vllm` drags in a large CUDA dependency tree, and most of the work is telling
@@ -290,6 +331,10 @@ wheels that need more than that get their own entry:
 - `torchvision`, `torchaudio`, `torch-c-dlpack-ext`, `xgrammar`, `flashinfer-python`,
   `tilelang`, `tokenspeed-mla`, `tokenspeed-triton`, `pynvvideocodec`, `vllm`,
   `xformers`
+- `sglang`, `sglang-kernel`, `sgl-deep-ep`, `sgl-deep-gemm` and `torch-memory-saver`
+  are compiled CUDA wheels from the same stack, and get the same search paths; the two
+  `deep_*` ones also resolve a CUDA_HOME at import, because sglang imports `deep_ep`
+  eagerly from its scheduler path
 - `torchcodec` also links ffmpeg and libheif, and ships one core/custom_ops module
   pair per ffmpeg major; only the pair matching the ffmpeg provided here is kept
 - `tilelang` bundles `libtvm.so`, which links Z3 under the versioned soname its build
@@ -307,7 +352,8 @@ wheels that need more than that get their own entry:
   empty"
 - `flashinfer-python`'s JIT links with `$CUDA_HOME/lib64`, but nixpkgs ships `lib/`
   and `lib/stubs`, so any JIT-compiled op (vllm's sampler is one) failed to link
-  with `cannot find -lcuda`
+  with `cannot find -lcuda`; it and `sglang` also ask for `-Wl,-z,lazy`, for the
+  reason in "JIT at run time"
 
 ### Shell entries (optional)
 
